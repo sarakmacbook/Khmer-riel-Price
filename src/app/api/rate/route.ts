@@ -1,31 +1,39 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
-import { exchangeRates } from '@/db/schema';
-import { desc } from 'drizzle-orm';
+import { NextResponse } from 'next/server';
+import { getLatestRate } from '@/lib/rates';
+import { ScrapeError } from '@/lib/scraper';
+import { detectStore } from '@/lib/store/env';
 
 export const dynamic = 'force-dynamic';
+// Allow time for a slow Wing Bank response on the very first request
+export const maxDuration = 60;
 
-export async function GET(req: NextRequest) {
+export async function GET() {
   try {
-    const latest = await db.query.exchangeRates.findFirst({
-      orderBy: [desc(exchangeRates.timestamp)],
-    });
-
-    if (!latest) {
-      return NextResponse.json({ error: 'No rates found' }, { status: 404 });
-    }
-
-    const rate = parseFloat(latest.rate);
-    const bid = latest.bid ? parseFloat(latest.bid) : rate;
-    const ask = latest.ask ? parseFloat(latest.ask) : rate;
-
-    return NextResponse.json({
-      rate,
-      bid,   // bank buys USD  -> baseline for your P2P SELL
-      ask,   // bank sells USD  -> baseline for your P2P BUY
-      timestamp: latest.timestamp,
-    });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    const latest = await getLatestRate();
+    // With a shared database every instance sees the same value → short CDN cache.
+    // Without one, cache longer so cold instances rarely need to scrape.
+    const cache =
+      latest.storage !== 'memory'
+        ? 'public, max-age=0, s-maxage=5, stale-while-revalidate=55'
+        : 'public, max-age=0, s-maxage=30, stale-while-revalidate=300';
+    return NextResponse.json(latest, { headers: { 'Cache-Control': cache } });
+  } catch (error) {
+    const err = error as Error;
+    const kind = err instanceof ScrapeError ? err.kind : 'unknown';
+    const hint =
+      kind === 'blocked'
+        ? "Wing Bank's firewall is blocking this server's IP. Set WINGBANK_URL to a proxy, or self-host with install.sh."
+        : kind === 'timeout'
+          ? 'Wing Bank is responding slowly. It will retry automatically.'
+          : 'Open /api/status?check=1 for diagnostics.';
+    let storage = 'unknown';
+    try {
+      storage = detectStore().kind;
+    } catch {}
+    return NextResponse.json(
+      { error: err.message, kind, hint, storage },
+      // Cache errors briefly so polling browsers don't trigger a scrape every 5s
+      { status: 503, headers: { 'Cache-Control': 'public, max-age=0, s-maxage=15' } },
+    );
   }
 }

@@ -1,38 +1,49 @@
-import { drizzle } from "drizzle-orm/node-postgres";
-import { drizzle as drizzleVercel } from "drizzle-orm/vercel-postgres";
-import { Pool } from "pg";
-import { sql } from "@vercel/postgres";
+import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
+import { Pool, type PoolConfig } from 'pg';
 import * as schema from './schema';
 
-const databaseUrl = process.env.DATABASE_URL;
+// Postgres connection used by the Postgres storage adapter (src/lib/store/postgres.ts).
+// Works with Neon, Supabase, Prisma Postgres (direct URL), Nile, AWS, local/Docker Postgres.
 
-// Detect if we are on Vercel (where we should use the specialized vercel-postgres driver)
-const isVercel = process.env.VERCEL === '1' || !!process.env.VERCEL_URL;
+const MANAGED_HOSTS =
+  /(neon\.tech|supabase\.(co|com)|prisma\.io|thenile\.dev|vercel-storage\.com|rds\.amazonaws\.com|render\.com|railway\.app|aivencloud\.com|digitalocean\.com)$/i;
 
-let db: any;
-
-if (isVercel) {
-  db = drizzleVercel(sql, { schema });
-} else {
-  if (!databaseUrl) {
-    throw new Error("DATABASE_URL is required");
-  }
-
-  const globalForDb = globalThis as typeof globalThis & {
-    __arenaNextJsPostgresqlPool?: Pool;
+function poolConfig(url: string): PoolConfig {
+  const isServerless = Boolean(process.env.VERCEL);
+  const base: PoolConfig = {
+    max: isServerless ? 3 : 10,
+    idleTimeoutMillis: isServerless ? 5_000 : 30_000,
+    connectionTimeoutMillis: 10_000,
   };
-
-  const pool =
-    globalForDb.__arenaNextJsPostgresqlPool ??
-    new Pool({
-      connectionString: databaseUrl,
-    });
-
-  if (process.env.NODE_ENV !== "production") {
-    globalForDb.__arenaNextJsPostgresqlPool = pool;
+  try {
+    const u = new URL(url);
+    const mode = u.searchParams.get('sslmode');
+    const wantsTls = (mode !== null && mode !== 'disable') || MANAGED_HOSTS.test(u.hostname);
+    // Params pg can't use / would misinterpret
+    ['sslmode', 'sslrootcert', 'sslcert', 'sslkey', 'channel_binding', 'pgbouncer', 'connect_timeout', 'supa'].forEach((p) =>
+      u.searchParams.delete(p),
+    );
+    if (!wantsTls) return { ...base, connectionString: u.toString() };
+    // Managed providers require TLS; some poolers use a private CA that strict verification rejects.
+    return { ...base, connectionString: u.toString(), ssl: { rejectUnauthorized: false } };
+  } catch {
+    return { ...base, connectionString: url };
   }
-
-  db = drizzle(pool, { schema });
 }
 
-export { db };
+export type Db = NodePgDatabase<typeof schema>;
+
+const g = globalThis as typeof globalThis & { __wingratePg?: Map<string, { pool: Pool; db: Db }> };
+
+/** One pool per connection string per instance (reused across requests / hot reloads). */
+export function connectPostgres(url: string): { pool: Pool; db: Db } {
+  g.__wingratePg ??= new Map();
+  let conn = g.__wingratePg.get(url);
+  if (!conn) {
+    const pool = new Pool(poolConfig(url));
+    pool.on('error', (err) => console.error('[postgres] pool error', err.message)); // never crash on idle errors
+    conn = { pool, db: drizzle(pool, { schema }) };
+    g.__wingratePg.set(url, conn);
+  }
+  return conn;
+}

@@ -1,44 +1,36 @@
-FROM node:20-alpine AS base
-
-# Install dependencies only when needed
-FROM base AS deps
+# ---------- 1. Install dependencies ----------
+FROM node:20-alpine AS deps
 RUN apk add --no-cache libc6-compat
 WORKDIR /app
-
-COPY package.json package-lock.json* ./
+COPY package.json package-lock.json ./
 RUN npm ci
 
-# Rebuild the source code only when needed
-FROM base AS builder
+# ---------- 2. Build ----------
+FROM node:20-alpine AS builder
 WORKDIR /app
+ENV NEXT_TELEMETRY_DISABLED=1
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-
-# Set environment variables for build time
-ENV NEXT_TELEMETRY_DISABLED 1
-
 RUN npm run build
 
-# Production image, copy all the files and run next
-FROM base AS runner
+# ---------- 3. Run ----------
+FROM node:20-alpine AS runner
 WORKDIR /app
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    PORT=3000 \
+    HOSTNAME=0.0.0.0
 
-ENV NODE_ENV production
-ENV NEXT_TELEMETRY_DISABLED 1
+RUN addgroup -S -g 1001 nodejs && adduser -S -u 1001 -G nodejs nextjs
 
-RUN addgroup --system --gid 1001 nodejs
-RUN adduser --system --uid 1001 nextjs
-
+COPY --from=builder /app/package.json ./package.json
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/next.config.ts ./next.config.ts
 COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next ./.next
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/package.json ./package.json
 
 USER nextjs
-
 EXPOSE 3000
 
-ENV PORT 3000
-HOSTNAME "0.0.0.0"
-
-CMD ["npm", "start"]
+# Tables are created automatically on first request (see src/db/index.ts)
+CMD ["npx", "next", "start", "-H", "0.0.0.0", "-p", "3000"]

@@ -1,79 +1,48 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
-import { exchangeRates } from '@/db/schema';
-import { desc, gte } from 'drizzle-orm';
-import { ensureDailyHistory } from '@/lib/seed-history';
+import { getStore, type Point } from '@/lib/store';
+import { DAY_MS, errMsg } from '@/lib/store/types';
 
 export const dynamic = 'force-dynamic';
 
-const RANGE_MS: Record<string, number> = {
-  day: 24 * 60 * 60 * 1000,
-  week: 7 * 24 * 60 * 60 * 1000,
-  month: 30 * 24 * 60 * 60 * 1000,
-  year: 365 * 24 * 60 * 60 * 1000,
-};
+const RANGE_MS: Record<string, number> = { day: DAY_MS, week: 7 * DAY_MS, month: 30 * DAY_MS, year: 365 * DAY_MS };
 
 export async function GET(req: NextRequest) {
+  let store;
   try {
-    await ensureDailyHistory();
+    store = await getStore();
+  } catch {
+    store = null;
+  }
+  if (!store || !store.persistent) {
+    // History needs a database; the UI explains this instead of erroring
+    return NextResponse.json([], { headers: { 'Cache-Control': 'public, s-maxage=300', 'X-WingRate-Storage': 'memory' } });
+  }
 
+  try {
     const range = req.nextUrl.searchParams.get('range') ?? 'day';
-    const isAll = range === 'all';
-    const windowMs = isAll ? null : (RANGE_MS[range] ?? RANGE_MS.day);
+    const now = Date.now();
+    const since = range === 'all' ? null : now - (RANGE_MS[range] ?? DAY_MS);
+    let points: Point[];
 
-    let rows;
-    if (windowMs) {
-      const since = new Date(Date.now() - windowMs);
-      rows = await db.query.exchangeRates.findMany({
-        where: gte(exchangeRates.timestamp, since),
-        orderBy: [desc(exchangeRates.timestamp)],
-        limit: 3000,
-      });
+    if (range === 'day' && since !== null) {
+      // Price changes in the last 24h + the price that was active at the window start
+      const [inWindow, prior] = await Promise.all([store.range(since), store.before(since)]);
+      points = prior ? [{ ...prior, t: since }, ...inWindow] : inWindow;
     } else {
-      rows = await db.query.exchangeRates.findMany({
-        orderBy: [desc(exchangeRates.timestamp)],
-        limit: 3000,
-      });
+      points = await store.daily(since); // last price of each local day
     }
 
-    // Chronological order (oldest -> newest)
-    const chronological = rows.reverse();
+    // Extend the line to "now" with the current price
+    const last = points[points.length - 1];
+    if (last && now - last.t > 60_000) points.push({ ...last, t: now });
 
-    let points: Array<{ rate: number; bid: number; ask: number; timestamp: Date | string }>;
-
-    if (range === 'day') {
-      // Intra-day points for the day view
-      points = chronological.map((r: (typeof rows)[number]) => {
-        const bankBuys = r.bid ? parseFloat(r.bid) : parseFloat(r.rate);
-        return {
-          rate: bankBuys,
-          bid: bankBuys, // Bank buys USD
-          ask: r.ask ? parseFloat(r.ask) : bankBuys + 8,
-          timestamp: r.timestamp,
-        };
-      });
-    } else {
-      // Daily snapshot: 1 snapshot per calendar day (last record of that day)
-      const dailyMap = new Map<string, typeof rows[number]>();
-      for (const r of chronological) {
-        const d = new Date(r.timestamp);
-        const dayKey = d.toISOString().slice(0, 10); // YYYY-MM-DD
-        dailyMap.set(dayKey, r); // latest of each day
-      }
-
-      points = Array.from(dailyMap.values()).map((r) => {
-        const bankBuys = r.bid ? parseFloat(r.bid) : parseFloat(r.rate);
-        return {
-          rate: bankBuys,
-          bid: bankBuys, // Bank buys USD
-          ask: r.ask ? parseFloat(r.ask) : bankBuys + 8,
-          timestamp: r.timestamp,
-        };
-      });
-    }
-
-    return NextResponse.json(points);
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json(points, {
+      headers: {
+        'Cache-Control': 'public, max-age=0, s-maxage=60, stale-while-revalidate=300',
+        'X-WingRate-Storage': store.kind,
+      },
+    });
+  } catch (error) {
+    return NextResponse.json({ error: errMsg(error), storage: store.kind }, { status: 500 });
   }
 }

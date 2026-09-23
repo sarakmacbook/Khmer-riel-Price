@@ -1,13 +1,17 @@
-import { db } from "@/db";
-import { sql } from "drizzle-orm";
+import { getStore } from '@/lib/store';
+import { detectStore } from '@/lib/store/env';
 
-export const dynamic = "force-dynamic";
+export const dynamic = 'force-dynamic';
 
 export async function GET() {
+  let kind = 'memory';
   try {
-    await db.execute(sql`select 1`);
-    return Response.json({ ok: true });
-  } catch {
-    return Response.json({ ok: false }, { status: 500 });
+    kind = detectStore().kind;
+    if (kind === 'memory') return Response.json({ ok: true, storage: kind });
+    const store = await getStore();
+    await store.latest();
+    return Response.json({ ok: true, storage: kind });
+  } catch (e) {
+    return Response.json({ ok: false, storage: kind, error: (e as Error).message }, { status: 500 });
   }
 }
