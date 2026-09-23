@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="WingRate — KHR/USD tracker">
+  <title>WingRate</title>
+  <defs>
+    <!-- Brand surface: indigo down to near-black navy -->
+    <linearGradient id="wr-bg" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0" stop-color="#6366f1"/>
+      <stop offset="0.52" stop-color="#4338ca"/>
+      <stop offset="1" stop-color="#0a0e1a"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Full-bleed square: iOS rounds the corners itself, Android masks scale in.
+       All mark geometry stays inside the centre 80% safe zone. -->
+  <rect width="512" height="512" fill="url(#wr-bg)"/>
+
+  <!-- The mark: a chart zigzag whose shape reads as a "W" and ends rising -->
+  <path
+    d="M124 288 L188 356 L256 232 L320 348 L388 188"
+    fill="none"
+    stroke="#ffffff"
+    stroke-width="40"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+
+  <!-- Arrowhead, seated on the final rising segment -->
+  <path d="M406 146 L419 201 L357 175 Z" fill="#ffffff"/>
+
+  <!-- Accent: the plotted origin point -->
+  <circle cx="124" cy="288" r="19" fill="#22d3ee"/>
+</svg>
