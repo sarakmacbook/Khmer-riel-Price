@@ -1,49 +1,69 @@
-import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
-import { Pool, type PoolConfig } from 'pg';
-import * as schema from './schema';
+import { drizzle } from "drizzle-orm/node-postgres";
+import { Pool } from "pg";
+import * as schema from "./schema";
 
-// Postgres connection used by the Postgres storage adapter (src/lib/store/postgres.ts).
-// Works with Neon, Supabase, Prisma Postgres (direct URL), Nile, AWS, local/Docker Postgres.
+// Accept every name Vercel's database integrations use:
+//  • Neon integration            → DATABASE_URL (+ DATABASE_URL_UNPOOLED)
+//  • Vercel Postgres (legacy)     → POSTGRES_URL / POSTGRES_PRISMA_URL
+//  • Supabase integration         → SUPABASE_DB_URL / POSTGRES_URL
+//  • self-hosted / Docker / .env  → DATABASE_URL
+// NOTE: we must NEVER throw at import time — a missing env var on Vercel
+// would otherwise 500 every API route before a single line runs.
+const databaseUrl =
+  process.env.POSTGRES_URL ??
+  process.env.POSTGRES_PRISMA_URL ??
+  process.env.DATABASE_URL ??
+  process.env.SUPABASE_DB_URL ??
+  process.env.POSTGRES_URL_NON_POOLING ??
+  undefined;
 
-const MANAGED_HOSTS =
-  /(neon\.tech|supabase\.(co|com)|prisma\.io|thenile\.dev|vercel-storage\.com|rds\.amazonaws\.com|render\.com|railway\.app|aivencloud\.com|digitalocean\.com)$/i;
+// Local/self-hosted Postgres usually rejects TLS; hosted (Neon, Supabase,
+// Vercel Postgres, Railway) requires it.
+const isLocal = !databaseUrl || /localhost|127\.0\.0\.1|::1|@db:/.test(databaseUrl);
 
-function poolConfig(url: string): PoolConfig {
-  const isServerless = Boolean(process.env.VERCEL);
-  const base: PoolConfig = {
-    max: isServerless ? 3 : 10,
-    idleTimeoutMillis: isServerless ? 5_000 : 30_000,
-    connectionTimeoutMillis: 10_000,
-  };
-  try {
-    const u = new URL(url);
-    const mode = u.searchParams.get('sslmode');
-    const wantsTls = (mode !== null && mode !== 'disable') || MANAGED_HOSTS.test(u.hostname);
-    // Params pg can't use / would misinterpret
-    ['sslmode', 'sslrootcert', 'sslcert', 'sslkey', 'channel_binding', 'pgbouncer', 'connect_timeout', 'supa'].forEach((p) =>
-      u.searchParams.delete(p),
-    );
-    if (!wantsTls) return { ...base, connectionString: u.toString() };
-    // Managed providers require TLS; some poolers use a private CA that strict verification rejects.
-    return { ...base, connectionString: u.toString(), ssl: { rejectUnauthorized: false } };
-  } catch {
-    return { ...base, connectionString: url };
+// Cache the pool on globalThis: serverless invocations reuse the same
+// container, so this keeps connection usage to a handful per warm instance
+// instead of exhausting the database limit on every cold start.
+const globalForDb = globalThis as typeof globalThis & { __wingRatePool?: Pool };
+
+export function getPool(): Pool | null {
+  if (!databaseUrl) return null;
+  if (!globalForDb.__wingRatePool) {
+    globalForDb.__wingRatePool = new Pool({
+      connectionString: databaseUrl,
+      ssl: isLocal ? undefined : { rejectUnauthorized: false },
+      max: 3,
+      idleTimeoutMillis: 20_000,
+      connectionTimeoutMillis: 10_000,
+    });
   }
+  return globalForDb.__wingRatePool;
 }
 
-export type Db = NodePgDatabase<typeof schema>;
+const pool = getPool();
+const realDb = pool ? drizzle(pool, { schema }) : null;
 
-const g = globalThis as typeof globalThis & { __wingratePg?: Map<string, { pool: Pool; db: Db }> };
+// Fallback stub: any access throws a clear, catchable error so routes can
+// gracefully degrade (live-scraper endpoints keep working with no database).
+const missingDb = {
+  query: new Proxy(
+    {},
+    {
+      get() {
+        throw new Error("DATABASE_URL/POSTGRES_URL not configured");
+      },
+    },
+  ),
+  insert: () => {
+    throw new Error("DATABASE_URL/POSTGRES_URL not configured");
+  },
+  update: () => {
+    throw new Error("DATABASE_URL/POSTGRES_URL not configured");
+  },
+  execute: () => {
+    throw new Error("DATABASE_URL/POSTGRES_URL not configured");
+  },
+};
 
-/** One pool per connection string per instance (reused across requests / hot reloads). */
-export function connectPostgres(url: string): { pool: Pool; db: Db } {
-  g.__wingratePg ??= new Map();
-  let conn = g.__wingratePg.get(url);
-  if (!conn) {
-    const pool = new Pool(poolConfig(url));
-    pool.on('error', (err) => console.error('[postgres] pool error', err.message)); // never crash on idle errors
-    conn = { pool, db: drizzle(pool, { schema }) };
-    g.__wingratePg.set(url, conn);
-  }
-  return conn;
-}
+export const db: any = realDb ?? missingDb;
+export const hasDatabase = Boolean(realDb);

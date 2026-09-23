@@ -1,17 +1,31 @@
-import { getStore } from '@/lib/store';
-import { detectStore } from '@/lib/store/env';
+import { storeBackend, storeDiagnostics, pingStore } from "@/lib/history-store";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
+/**
+ * Health + database diagnostics. Works with ANY configured store
+ * (Postgres / Turso / Upstash) and with none at all — the live rate is
+ * scraped directly, so a missing database never reports the app as down.
+ */
 export async function GET() {
-  let kind = 'memory';
+  const store = storeBackend();
+  const diagnostics = storeDiagnostics();
+  let storeOk = false;
+  let error: string | null = null;
+
   try {
-    kind = detectStore().kind;
-    if (kind === 'memory') return Response.json({ ok: true, storage: kind });
-    const store = await getStore();
-    await store.latest();
-    return Response.json({ ok: true, storage: kind });
-  } catch (e) {
-    return Response.json({ ok: false, storage: kind, error: (e as Error).message }, { status: 500 });
+    storeOk = await pingStore();
+  } catch (err: any) {
+    error = err?.message ?? String(err);
   }
+
+  return Response.json({
+    ok: true,
+    store,
+    database: store !== "memory",
+    storeOk,
+    error,
+    ...diagnostics,
+    timestamp: new Date().toISOString(),
+  });
 }

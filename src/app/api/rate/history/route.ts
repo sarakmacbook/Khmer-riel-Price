@@ -1,48 +1,83 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getStore, type Point } from '@/lib/store';
-import { DAY_MS, errMsg } from '@/lib/store/types';
+import { ensureDailyHistory } from '@/lib/seed-history';
+import { loadTicks, seedHistoryIfEmpty, storeBackend, type Tick } from '@/lib/history-store';
+import { ensurePostgresSchema } from '@/lib/ensure-schema';
 
 export const dynamic = 'force-dynamic';
 
-const RANGE_MS: Record<string, number> = { day: DAY_MS, week: 7 * DAY_MS, month: 30 * DAY_MS, year: 365 * DAY_MS };
+const RANGE_MS: Record<string, number> = {
+  day: 24 * 60 * 60 * 1000,
+  week: 7 * 24 * 60 * 60 * 1000,
+  month: 30 * 24 * 60 * 60 * 1000,
+  year: 365 * 24 * 60 * 60 * 1000,
+};
 
+/**
+ * Price history — served from whichever free-tier store is configured
+ * (Postgres / Turso / Upstash) with daily-snapshot bucketing for
+ * week/month/year/all ranges.
+ */
 export async function GET(req: NextRequest) {
-  let store;
   try {
-    store = await getStore();
-  } catch {
-    store = null;
-  }
-  if (!store || !store.persistent) {
-    // History needs a database; the UI explains this instead of erroring
-    return NextResponse.json([], { headers: { 'Cache-Control': 'public, s-maxage=300', 'X-WingRate-Storage': 'memory' } });
-  }
-
-  try {
-    const range = req.nextUrl.searchParams.get('range') ?? 'day';
-    const now = Date.now();
-    const since = range === 'all' ? null : now - (RANGE_MS[range] ?? DAY_MS);
-    let points: Point[];
-
-    if (range === 'day' && since !== null) {
-      // Price changes in the last 24h + the price that was active at the window start
-      const [inWindow, prior] = await Promise.all([store.range(since), store.before(since)]);
-      points = prior ? [{ ...prior, t: since }, ...inWindow] : inWindow;
+    // Create tables on a fresh Vercel database BEFORE seeding/reading, so the
+    // very first request already returns data (no manual drizzle-kit push).
+    const backend = storeBackend();
+    if (backend === 'postgres') {
+      await ensurePostgresSchema();
+      await ensureDailyHistory();
     } else {
-      points = await store.daily(since); // last price of each local day
+      // Turso / Upstash / memory: auto-create storage + seed daily snapshots
+      await seedHistoryIfEmpty();
     }
 
-    // Extend the line to "now" with the current price
-    const last = points[points.length - 1];
-    if (last && now - last.t > 60_000) points.push({ ...last, t: now });
+    const range = req.nextUrl.searchParams.get('range') ?? 'day';
+    const isAll = range === 'all';
+    const windowMs = isAll ? null : (RANGE_MS[range] ?? RANGE_MS.day);
+
+    // Newest-first ticks from the active backend
+    const rows = await loadTicks(windowMs, 3000);
+
+    // Chronological order (oldest -> newest)
+    const chronological = [...rows].reverse();
+
+    const toPoint = (r: Tick) => {
+      const bankBuys = Number.isFinite(r.bid) ? r.bid : r.rate;
+      const bankSells = Number.isFinite(r.ask) ? r.ask : bankBuys + 8;
+      return {
+        rate: bankBuys,
+        bid: bankBuys, // Bank buys USD
+        ask: bankSells, // Bank sells USD
+        timestamp: r.timestamp,
+      };
+    };
+
+    let points;
+    if (range === 'day') {
+      // Intra-day points for the day view
+      points = chronological.map(toPoint);
+    } else {
+      // Daily snapshot: 1 snapshot per calendar day (last record of that day)
+      const dailyMap = new Map<string, Tick>();
+      for (const r of chronological) {
+        const dayKey = new Date(r.timestamp).toISOString().slice(0, 10);
+        dailyMap.set(dayKey, r);
+      }
+      points = Array.from(dailyMap.values()).map(toPoint);
+    }
 
     return NextResponse.json(points, {
       headers: {
-        'Cache-Control': 'public, max-age=0, s-maxage=60, stale-while-revalidate=300',
-        'X-WingRate-Storage': store.kind,
+        'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=300',
+        'x-store': storeBackend(),
       },
     });
-  } catch (error) {
-    return NextResponse.json({ error: errMsg(error), storage: store.kind }, { status: 500 });
+  } catch (error: any) {
+    // No store configured / tables not created yet (fresh deploy on a DB
+    // type that is not set up): return an empty chart series instead of
+    // breaking the page with a 500.
+    console.error('history unavailable:', error);
+    return NextResponse.json([], {
+      headers: { 'Cache-Control': 'public, s-maxage=30, stale-while-revalidate=60' },
+    });
   }
 }

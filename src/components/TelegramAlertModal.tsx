@@ -28,8 +28,6 @@ export default function TelegramAlertModal({
   const [testState, setTestState] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [testMessage, setTestMessage] = useState('');
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
-  const [saveError, setSaveError] = useState('');
-  const [databaseMissing, setDatabaseMissing] = useState(false);
 
   // Load existing settings
   useEffect(() => {
@@ -40,7 +38,6 @@ export default function TelegramAlertModal({
     fetch('/api/telegram/settings')
       .then((res) => res.json())
       .then((data) => {
-        setDatabaseMissing(Boolean(data.databaseMissing));
         if (data.configured) {
           setWebhookUrl(data.webhookUrl || '');
           setChatId(data.chatId || '');
@@ -91,7 +88,6 @@ export default function TelegramAlertModal({
 
   const handleSave = async () => {
     setSaveState('saving');
-    setSaveError('');
     try {
       const res = await fetch('/api/telegram/settings', {
         method: 'POST',
@@ -113,9 +109,8 @@ export default function TelegramAlertModal({
           onClose();
         }, 1200);
       } else {
-        const data = await res.json().catch(() => null);
         setSaveState('idle');
-        setSaveError(data?.error || `Save failed (HTTP ${res.status})`);
+        alert('Failed to save settings');
       }
     } catch (err) {
       setSaveState('idle');
@@ -316,19 +311,6 @@ export default function TelegramAlertModal({
                 </div>
               )}
             </div>
-
-            {databaseMissing && (
-              <div className="p-3 rounded-xl bg-black/30 border border-white/10 text-xs text-slate-300">
-                ⚠️ No database connected — <b>Send Test Alert</b> works, but saving automated alerts needs
-                storage (Vercel → Storage → any database), then redeploy.
-              </div>
-            )}
-            {saveError && (
-              <div className="p-3 rounded-xl bg-slate-800 border border-white/10 text-xs text-rose-300 flex items-center gap-2">
-                <AlertCircle className="h-4 w-4 shrink-0 text-rose-400" />
-                <span>{saveError}</span>
-              </div>
-            )}
 
             {/* Test Status feedback */}
             {testState === 'success' && (

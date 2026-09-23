@@ -10,6 +10,10 @@ let seeded = false;
  */
 export async function ensureDailyHistory() {
   if (seeded) return;
+  // Historical seeding uses Postgres-specific SQL — other store types
+  // (Turso / Upstash / memory) simply accumulate ticks over time.
+  const { storeBackend } = await import('@/lib/history-store');
+  if (storeBackend() !== 'postgres') return;
   try {
     const res: any = await db.execute(sql`SELECT COUNT(*)::int as count FROM exchange_rates`);
     const countVal = Number(res.rows ? res.rows[0]?.count : res[0]?.count ?? 0);

@@ -1,62 +1,98 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getStoreOrMemory } from '@/lib/store';
-import { errMsg } from '@/lib/store/types';
-import { getWebAlert, saveWebAlert } from '@/lib/alerts';
+import { db, hasDatabase } from '@/db';
+import { telegramAlerts } from '@/db/schema';
+import { desc, eq } from 'drizzle-orm';
+import { ensurePostgresSchema } from '@/lib/ensure-schema';
+import { storeBackend } from '@/lib/history-store';
 
 export const dynamic = 'force-dynamic';
 
-const MASK = '••••••••';
+const DEFAULTS = {
+  configured: false,
+  active: false,
+  webhookUrl: '',
+  chatId: '',
+  botToken: '',
+  condition: 'change',
+  targetRate: '',
+};
 
 export async function GET() {
-  const store = await getStoreOrMemory();
-  if (!store.persistent) {
-    return NextResponse.json({ configured: false, active: false, databaseMissing: true });
-  }
   try {
-    const alert = await getWebAlert(store);
+    if (!hasDatabase || storeBackend() !== 'postgres') return NextResponse.json(DEFAULTS);
+    await ensurePostgresSchema();
+    const alert = await db.query.telegramAlerts.findFirst({
+      orderBy: [desc(telegramAlerts.id)],
+    });
+
     if (!alert) {
-      return NextResponse.json({ configured: false, active: false, webhookUrl: '', chatId: '', botToken: '', condition: 'change', targetRate: '', storage: store.kind });
+      return NextResponse.json({
+        configured: false,
+        active: false,
+        webhookUrl: '',
+        chatId: '',
+        botToken: '',
+        condition: 'change',
+        targetRate: '',
+      });
     }
+
     return NextResponse.json({
       configured: true,
       active: alert.active,
       webhookUrl: alert.webhookUrl || '',
       chatId: alert.chatId || '',
-      botToken: alert.botToken ? MASK : '',
+      botToken: alert.botToken ? '••••••••' : '',
       hasToken: Boolean(alert.botToken || process.env.TELEGRAM_BOT_TOKEN),
       condition: alert.condition,
-      targetRate: alert.targetRate !== null ? String(alert.targetRate) : '',
-      lastAlertAt: alert.lastAlertAt ? new Date(alert.lastAlertAt) : null,
-      storage: store.kind,
+      targetRate: alert.targetRate ? alert.targetRate.toString() : '',
+      lastAlertAt: alert.lastAlertAt,
     });
-  } catch (err) {
-    return NextResponse.json({ error: errMsg(err) }, { status: 500 });
+  } catch {
+    // Table missing / DB unreachable — report "not configured" instead of 500.
+    return NextResponse.json(DEFAULTS);
   }
 }
 
 export async function POST(req: NextRequest) {
-  const store = await getStoreOrMemory();
-  if (!store.persistent) {
-    return NextResponse.json(
-      {
-        success: false,
-        error: 'Saving alerts needs a database. Connect any Vercel storage (Neon, Supabase, Upstash, Turso, MongoDB, Blob…), then redeploy.',
-      },
-      { status: 503 },
-    );
-  }
   try {
-    const { webhookUrl, chatId, botToken, condition, targetRate, active } = await req.json();
-    await saveWebAlert(store, {
+    if (!hasDatabase || storeBackend() !== 'postgres') {
+      return NextResponse.json(
+        { success: false, error: 'Telegram subscriber storage needs a Postgres database (Neon/Supabase/Vercel Postgres).' },
+        { status: 400 },
+      );
+    }
+    await ensurePostgresSchema();
+    const body = await req.json();
+    const { webhookUrl, chatId, botToken, condition, targetRate, active } = body;
+
+    // Find latest row or insert new
+    const existing = await db.query.telegramAlerts.findFirst({
+      orderBy: [desc(telegramAlerts.id)],
+    });
+
+    const valuesToUpdate: Record<string, any> = {
       webhookUrl: webhookUrl || null,
       chatId: chatId || null,
-      botToken: botToken && botToken !== MASK ? botToken : botToken === '' ? null : undefined,
-      condition: condition === 'above' || condition === 'below' ? condition : 'change',
-      targetRate: targetRate !== null && targetRate !== undefined && targetRate !== '' ? Number(targetRate) : null,
+      condition: condition || 'change',
+      targetRate: targetRate ? targetRate.toString() : null,
       active: typeof active === 'boolean' ? active : true,
-    });
-    return NextResponse.json({ success: true, storage: store.kind });
-  } catch (err) {
-    return NextResponse.json({ success: false, error: errMsg(err) }, { status: 500 });
+    };
+
+    if (botToken && botToken !== '••••••••') {
+      valuesToUpdate.botToken = botToken;
+    }
+
+    if (existing) {
+      await db.update(telegramAlerts)
+        .set(valuesToUpdate)
+        .where(eq(telegramAlerts.id, existing.id));
+    } else {
+      await db.insert(telegramAlerts).values(valuesToUpdate);
+    }
+
+    return NextResponse.json({ success: true });
+  } catch (err: any) {
+    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
   }
 }

@@ -1,25 +1,57 @@
-// Minimal service worker: installability + notifications.
-// No fetch handler on purpose — it would intercept every API poll for no benefit.
-self.addEventListener('install', () => self.skipWaiting());
-self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
+const CACHE = 'wingrate-shell-v2';
+const SHELL = [
+  '/',
+  '/manifest.json',
+  '/favicon.ico',
+  '/apple-touch-icon.png',
+  '/icons/icon-192.png',
+  '/icons/icon-512.png',
+  '/icons/icon-maskable-192.png',
+  '/icons/icon-maskable-512.png',
+];
 
-self.addEventListener('push', (event) => {
-  const data = event.data ? event.data.json() : { title: 'WingRate', body: 'Check the latest KHR/USD rate!' };
+self.addEventListener('install', (event) => {
   event.waitUntil(
-    self.registration.showNotification(data.title || 'WingRate', {
-      body: data.body,
-      icon: '/icons/icon-192x192.png',
-      badge: '/icons/icon-192x192.png',
-    }),
+    caches.open(CACHE).then((cache) => cache.addAll(SHELL).catch(() => undefined))
+  );
+  self.skipWaiting();
+});
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    caches
+      .keys()
+      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      .then(() => self.clients.claim())
   );
 });
 
-self.addEventListener('notificationclick', (event) => {
-  event.notification.close();
+self.addEventListener('fetch', (event) => {
+  if (event.request.method !== 'GET') return;
+  const url = new URL(event.request.url);
+  // Never cache API responses — rates must stay live.
+  if (url.pathname.startsWith('/api/')) return;
+
+  event.respondWith(
+    fetch(event.request)
+      .then((res) => {
+        const copy = res.clone();
+        caches.open(CACHE).then((cache) => cache.put(event.request, copy)).catch(() => undefined);
+        return res;
+      })
+      .catch(() => caches.match(event.request).then((hit) => hit || caches.match('/')))
+  );
+});
+
+self.addEventListener('push', (event) => {
+  const data = event.data
+    ? event.data.json()
+    : { title: 'WingRate', body: 'Check the latest KHR/USD rate!' };
   event.waitUntil(
-    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
-      const open = list.find((c) => 'focus' in c);
-      return open ? open.focus() : self.clients.openWindow('/');
-    }),
+    self.registration.showNotification(data.title, {
+      body: data.body,
+      icon: '/icons/icon-192.png',
+      badge: '/icons/icon-192.png',
+    })
   );
 });

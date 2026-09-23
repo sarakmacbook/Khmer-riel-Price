@@ -1,10 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getLatestRate } from '@/lib/rates';
-import { getStoreOrMemory } from '@/lib/store';
-import { setChatSubscription } from '@/lib/alerts';
-
-// /rate may trigger a background Wing Bank refresh
-export const maxDuration = 60;
+import { fetchWingBankQuote } from '@/lib/scraper';
+import { db, hasDatabase } from '@/db';
+import { telegramAlerts } from '@/db/schema';
+import { eq } from 'drizzle-orm';
+import { ensurePostgresSchema } from '@/lib/ensure-schema';
 
 async function sendTelegramMessage(chatId: string, text: string) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -47,7 +46,7 @@ export async function POST(req: NextRequest) {
       );
     } else if (text === '/rate') {
       try {
-        const quote = await getLatestRate();
+        const quote = await fetchWingBankQuote();
         await sendTelegramMessage(
           chatId,
           `🇰🇭 <b>Wing Bank Exchange Rate</b>\n\n` +
@@ -57,17 +56,44 @@ export async function POST(req: NextRequest) {
       } catch (error) {
         await sendTelegramMessage(chatId, 'Sorry, I could not fetch the rate right now.');
       }
-    } else if (text === '/alert' || text === '/stop') {
-      const store = await getStoreOrMemory();
-      if (!store.persistent) {
-        await sendTelegramMessage(chatId, '⚠️ Alerts need a database on the server. Ask the admin to connect one.');
-      } else if (text === '/alert') {
-        await setChatSubscription(store, chatId, true);
-        await sendTelegramMessage(chatId, `🔔 <b>Alerts Activated!</b> You will be notified whenever the Wing Bank rate updates.`);
+    } else if (text === '/alert') {
+      if (!hasDatabase) throw new Error('No Postgres database configured for Telegram subscriptions.');
+      await ensurePostgresSchema();
+      const existing = await db.query.telegramAlerts.findFirst({
+        where: eq(telegramAlerts.chatId, chatId),
+      });
+
+      if (existing) {
+        await db.update(telegramAlerts)
+          .set({ active: true })
+          .where(eq(telegramAlerts.id, existing.id));
       } else {
-        await setChatSubscription(store, chatId, false);
-        await sendTelegramMessage(chatId, `🔕 <b>Alerts Disabled.</b> Use /alert to re-enable anytime.`);
+        await db.insert(telegramAlerts).values({
+          chatId: chatId,
+          condition: 'change',
+          active: true,
+        });
       }
+
+      await sendTelegramMessage(
+        chatId,
+        `🔔 <b>Alerts Activated!</b> You will be notified whenever the Wing Bank rate updates.`
+      );
+    } else if (text === '/stop') {
+      if (hasDatabase) {
+        await ensurePostgresSchema();
+        const existing = await db.query.telegramAlerts.findFirst({
+          where: eq(telegramAlerts.chatId, chatId),
+        });
+
+        if (existing) {
+          await db.update(telegramAlerts)
+            .set({ active: false })
+            .where(eq(telegramAlerts.id, existing.id));
+        }
+      }
+
+      await sendTelegramMessage(chatId, `🔕 <b>Alerts Disabled.</b> Use /alert to re-enable anytime.`);
     } else {
       await sendTelegramMessage(chatId, 'Unknown command. Use /rate to get the latest exchange rate or /alert to subscribe.');
     }
