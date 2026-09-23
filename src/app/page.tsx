@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import { TrendingUp, TrendingDown, RefreshCw, Bell, Calculator, Sparkles, Send } from 'lucide-react';
+import BrandMark from '@/components/BrandMark';
 import InstallToHomescreen from '@/components/InstallToHomescreen';
 
 // Lazy-loaded so the heavy Recharts bundle (and the modal) are split into
@@ -95,8 +96,9 @@ export default function RateTracker() {
 
   if (loading) {
     return (
-      <div className="flex h-screen items-center justify-center">
-        <RefreshCw className="h-12 w-12 animate-spin text-indigo-400" />
+      <div className="flex h-screen flex-col items-center justify-center gap-4">
+        <BrandMark title="WingRate" className="h-16 w-16 rounded-2xl shadow-2xl shadow-indigo-500/30" />
+        <RefreshCw className="h-5 w-5 animate-spin text-indigo-300" />
       </div>
     );
   }
@@ -132,9 +134,7 @@ export default function RateTracker() {
       <header className="bg-white/5 backdrop-blur-xl border-b border-white/10 sticky top-0 z-10">
         <div className="max-w-4xl mx-auto px-4 h-16 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="bg-indigo-500 p-2 rounded-xl shadow-lg shadow-indigo-500/30">
-              <TrendingUp className="h-5 w-5 text-white" />
-            </div>
+            <BrandMark className="h-9 w-9 rounded-xl shadow-lg shadow-indigo-500/30" />
             <h1 className="text-xl font-black tracking-tight text-white">
               Wing<span className="text-indigo-400">Rate</span>
             </h1>
@@ -291,6 +291,7 @@ export default function RateTracker() {
         {/* Credit */}
         <footer className="mt-8 text-center">
           <div className="inline-flex items-center gap-2 text-xs text-slate-400 bg-white/5 border border-white/10 rounded-full px-4 py-2">
+            <BrandMark className="h-4 w-4 rounded" />
             <Sparkles className="h-3.5 w-3.5 text-indigo-400" />
             Built with{' '}
             <span className="text-indigo-300 font-semibold">Claude Sonnet 4.5</span>

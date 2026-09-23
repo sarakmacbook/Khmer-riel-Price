@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Share, PlusSquare, X, Download } from "lucide-react";
+import BrandMark from "@/components/BrandMark";
 
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>;
@@ -75,8 +76,7 @@ export default function InstallToHomescreen() {
       </button>
 
       <div className="flex items-center gap-2 mb-3">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src="/icons/icon-192.png" alt="WingRate" className="h-9 w-9 rounded-xl" />
+        <BrandMark title="WingRate" className="h-9 w-9 shrink-0 rounded-xl" />
         <div>
           <p className="text-sm font-bold text-white leading-tight">
             Add WingRate to Home Screen

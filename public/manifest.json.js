@@ -1,35 +1,24 @@
 "use strict";
 
-/**
- * @typedef {Object} PWAConfig
- * @property {string} name
- * @property {string} short_name
- * @property {string} start_url
- * @property {string} display
- * @property {string} background_color
- * @property {string} theme_color
- * @property {Array<{src: string, sizes: string[], type: string}>} icons
- */
-
-/** @type {PWAConfig} */
+// Kept as a small reference for deployments that inspect the public folder.
+// The served manifest is public/manifest.json.
 const manifest = {
-  name: "Wing Bank Rate Tracker",
+  name: "WingRate — KHR/USD Tracker",
   short_name: "WingRate",
+  description: "Live Wing Bank USD/KHR exchange rate, price history and alerts.",
   start_url: "/",
+  scope: "/",
+  id: "/",
   display: "standalone",
-  background_color: "#ffffff",
-  theme_color: "#E73E3E",
+  orientation: "portrait",
+  background_color: "#0a0e1a",
+  theme_color: "#4f46e5",
   icons: [
-    {
-      src: "/icons/icon-192x192.png",
-      sizes: "192x192",
-      type: "image/png",
-    },
-    {
-      src: "/icons/icon-512x512.png",
-      sizes: "512x512",
-      type: "image/png",
-    },
+    { src: "/favicon.svg", sizes: "any", type: "image/svg+xml", purpose: "any" },
+    { src: "/icons/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
+    { src: "/icons/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
+    { src: "/icons/icon-maskable-192.png", sizes: "192x192", type: "image/png", purpose: "maskable" },
+    { src: "/icons/icon-maskable-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
   ],
 };
 
