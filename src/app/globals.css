@@ -1,0 +1,24 @@
+@import "tailwindcss";
+
+:root {
+  --bg-1: #0a0a0f;
+  --bg-2: #101018;
+  --accent: #6366f1; /* indigo — primary accent */
+}
+
+body {
+  background:
+    radial-gradient(1100px 600px at 20% -10%, rgba(99, 102, 241, 0.14), transparent 60%),
+    radial-gradient(900px 600px at 85% 5%, rgba(99, 102, 241, 0.08), transparent 55%),
+    linear-gradient(180deg, var(--bg-1), var(--bg-2));
+  background-attachment: fixed;
+}
+
+/* subtle animated shimmer for the live price */
+@keyframes pulseGlow {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+.animate-pulse-glow {
+  animation: pulseGlow 2s ease-in-out infinite;
+}

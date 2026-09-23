@@ -1,0 +1,23 @@
+import { pgTable, serial, numeric, timestamp, text, boolean } from 'drizzle-orm/pg-core';
+
+export const exchangeRates = pgTable('exchange_rates', {
+  id: serial('id').primaryKey(),
+  rate: numeric('rate', { precision: 12, scale: 4 }).notNull(),
+  /** Wing Bank Bid: bank buys 1 USD from you (used when you SELL USDT) */
+  bid: numeric('bid', { precision: 12, scale: 4 }),
+  /** Wing Bank Ask: bank sells 1 USD to you (used when you BUY USDT) */
+  ask: numeric('ask', { precision: 12, scale: 4 }),
+  timestamp: timestamp('timestamp').defaultNow().notNull(),
+});
+
+export const telegramAlerts = pgTable('telegram_alerts', {
+  id: serial('id').primaryKey(),
+  webhookUrl: text('webhook_url'),
+  chatId: text('chat_id'),
+  botToken: text('bot_token'),
+  condition: text('condition').default('change').notNull(), // 'change' | 'above' | 'below'
+  targetRate: numeric('target_rate', { precision: 12, scale: 4 }),
+  active: boolean('active').default(true).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  lastAlertAt: timestamp('last_alert_at'),
+});
