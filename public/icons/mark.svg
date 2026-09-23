@@ -1,31 +1,28 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="WingRate — KHR/USD tracker">
-  <title>WingRate</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="wingrate-title wingrate-description">
+  <title id="wingrate-title">WingRate</title>
+  <desc id="wingrate-description">A rising white exchange-rate chart forming a W on an indigo background.</desc>
   <defs>
-    <!-- Brand surface: indigo down to near-black navy -->
-    <linearGradient id="wr-bg" x1="0.5" y1="0" x2="0.5" y2="1">
-      <stop offset="0" stop-color="#6366f1"/>
-      <stop offset="0.52" stop-color="#4338ca"/>
+    <linearGradient id="wingrate-surface" x1="0.18" y1="0" x2="0.82" y2="1">
+      <stop offset="0" stop-color="#818cf8"/>
+      <stop offset="0.48" stop-color="#4f46e5"/>
       <stop offset="1" stop-color="#0a0e1a"/>
     </linearGradient>
+    <radialGradient id="wingrate-glow" cx="0.78" cy="0.18" r="0.7">
+      <stop offset="0" stop-color="#a5b4fc" stop-opacity="0.38"/>
+      <stop offset="1" stop-color="#a5b4fc" stop-opacity="0"/>
+    </radialGradient>
   </defs>
 
-  <!-- Full-bleed square: iOS rounds the corners itself, Android masks scale in.
-       All mark geometry stays inside the centre 80% safe zone. -->
-  <rect width="512" height="512" fill="url(#wr-bg)"/>
-
-  <!-- The mark: a chart zigzag whose shape reads as a "W" and ends rising -->
+  <rect width="512" height="512" fill="url(#wingrate-surface)"/>
+  <rect width="512" height="512" fill="url(#wingrate-glow)"/>
   <path
-    d="M124 288 L188 356 L256 232 L320 348 L388 188"
+    d="M104 302 L180 378 L256 228 L332 354 L403 145"
     fill="none"
     stroke="#ffffff"
-    stroke-width="40"
+    stroke-width="42"
     stroke-linecap="round"
     stroke-linejoin="round"
   />
-
-  <!-- Arrowhead, seated on the final rising segment -->
-  <path d="M406 146 L419 201 L357 175 Z" fill="#ffffff"/>
-
-  <!-- Accent: the plotted origin point -->
-  <circle cx="124" cy="288" r="19" fill="#22d3ee"/>
+  <path d="M403 104 L435 167 L371 150 Z" fill="#22d3ee"/>
+  <circle cx="104" cy="302" r="20" fill="#22d3ee"/>
 </svg>

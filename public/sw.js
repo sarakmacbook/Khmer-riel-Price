@@ -1,15 +1,17 @@
-const CACHE = 'wingrate-shell-v2';
+const CACHE = 'wingrate-shell-v3';
 const SHELL = [
   '/',
   '/manifest.json',
   '/favicon.ico',
   '/favicon.svg',
+  '/icons/mark.svg',
   '/apple-touch-icon.png',
   '/apple-touch-icon-152.png',
   '/apple-touch-icon-167.png',
   '/apple-touch-icon-120.png',
   '/apple-touch-icon-76.png',
   '/icons/icon-48.png',
+  '/icons/icon-72.png',
   '/icons/icon-96.png',
   '/icons/icon-144.png',
   '/icons/icon-192.png',
