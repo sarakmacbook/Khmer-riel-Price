@@ -60,13 +60,13 @@ export class MongoStore implements RateStore {
     const mod = await import('mongodb');
     this.ObjectId = mod.ObjectId;
     g.__wingrateMongo ??= new Map();
-    let clientP = g.__wingrateMongo.get(this.uri);
-    if (!clientP) {
-      clientP = new mod.MongoClient(this.uri, {
-        maxPoolSize: process.env.VERCEL ? 3 : 10,
-        serverSelectionTimeoutMS: 8_000,
-        appName: 'wingrate',
-      }).connect();
+    const cached = g.__wingrateMongo.get(this.uri);
+    const clientP = cached ?? new mod.MongoClient(this.uri, {
+      maxPoolSize: process.env.VERCEL ? 3 : 10,
+      serverSelectionTimeoutMS: 8_000,
+      appName: 'wingrate',
+    }).connect();
+    if (!cached) {
       g.__wingrateMongo.set(this.uri, clientP);
       clientP.catch(() => g.__wingrateMongo?.delete(this.uri));
     }
