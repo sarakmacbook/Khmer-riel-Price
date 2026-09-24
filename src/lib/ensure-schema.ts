@@ -18,11 +18,15 @@ CREATE TABLE IF NOT EXISTS exchange_rates (
   ask       NUMERIC(12,4),
   timestamp TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE exchange_rates ADD COLUMN IF NOT EXISTS bid NUMERIC(12,4);
+ALTER TABLE exchange_rates ADD COLUMN IF NOT EXISTS ask NUMERIC(12,4);
+ALTER TABLE exchange_rates ADD COLUMN IF NOT EXISTS checked_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS exchange_rates_timestamp_idx
   ON exchange_rates (timestamp);
 
 CREATE TABLE IF NOT EXISTS telegram_alerts (
   id           SERIAL PRIMARY KEY,
+  source       TEXT NOT NULL DEFAULT 'web',
   webhook_url  TEXT,
   chat_id      TEXT,
   bot_token    TEXT,
@@ -32,6 +36,7 @@ CREATE TABLE IF NOT EXISTS telegram_alerts (
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   last_alert_at TIMESTAMPTZ
 );
+ALTER TABLE telegram_alerts ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'web';
 CREATE INDEX IF NOT EXISTS telegram_alerts_active_idx
   ON telegram_alerts (active);
 `;

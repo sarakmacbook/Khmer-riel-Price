@@ -47,7 +47,9 @@ async function recordIn(store: RateStore, q: { bid: number; ask: number }, now: 
   const res = await store.record(q, now);
   g.__wingrateCache = { kind: store.kind, row: res.row, readAt: Date.now() };
   if (res.prev && res.changed && store.persistent) {
-    await notifyRateChange(res.prev.bid, { ...q, rate: q.bid }).catch((e) => console.error('[alerts]', errMsg(e)));
+    await notifyRateChange(res.prev.bid, { ...q, rate: q.bid, fetchedAt: new Date(now).toISOString() }).catch((e) =>
+      console.error('[alerts]', errMsg(e)),
+    );
   }
   return toLatest(res.row, store.kind);
 }

@@ -8,10 +8,14 @@ export const exchangeRates = pgTable('exchange_rates', {
   /** Wing Bank Ask: bank sells 1 USD to you (used when you BUY USDT) */
   ask: numeric('ask', { precision: 12, scale: 4 }),
   timestamp: timestamp('timestamp').defaultNow().notNull(),
+  /** Last time this price was confirmed unchanged (see PostgresStore.record) */
+  checkedAt: timestamp('checked_at'),
 });
 
 export const telegramAlerts = pgTable('telegram_alerts', {
   id: serial('id').primaryKey(),
+  /** Where the alert was created: 'web' (dashboard) or 'bot' (Telegram) */
+  source: text('source').default('web').notNull(),
   webhookUrl: text('webhook_url'),
   chatId: text('chat_id'),
   botToken: text('bot_token'),

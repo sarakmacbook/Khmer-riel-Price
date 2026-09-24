@@ -1,6 +1,9 @@
-import { drizzle } from "drizzle-orm/node-postgres";
+import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import * as schema from "./schema";
+
+/** Drizzle client over `pg` with the app schema loaded (relational queries available). */
+export type Db = NodePgDatabase<typeof schema>;
 
 // Accept every name Vercel's database integrations use:
 //  • Neon integration            → DATABASE_URL (+ DATABASE_URL_UNPOOLED)
@@ -17,27 +20,47 @@ const databaseUrl =
   process.env.POSTGRES_URL_NON_POOLING ??
   undefined;
 
-// Local/self-hosted Postgres usually rejects TLS; hosted (Neon, Supabase,
-// Vercel Postgres, Railway) requires it.
-const isLocal = !databaseUrl || /localhost|127\.0\.0\.1|::1|@db:/.test(databaseUrl);
-
-// Cache the pool on globalThis: serverless invocations reuse the same
-// container, so this keeps connection usage to a handful per warm instance
+// Cache pools on globalThis (keyed by URL): serverless invocations reuse the
+// same container, so this keeps connection usage to a handful per warm instance
 // instead of exhausting the database limit on every cold start.
-const globalForDb = globalThis as typeof globalThis & { __wingRatePool?: Pool };
+const globalForDb = globalThis as typeof globalThis & { __wingRatePools?: Map<string, Pool> };
+
+function makePool(url: string): Pool {
+  // Local/self-hosted Postgres usually rejects TLS; hosted (Neon, Supabase,
+  // Vercel Postgres, Railway) requires it.
+  const isLocal = /localhost|127\.0\.0\.1|::1|@db:/.test(url);
+  return new Pool({
+    connectionString: url,
+    ssl: isLocal ? undefined : { rejectUnauthorized: false },
+    max: 3,
+    idleTimeoutMillis: 20_000,
+    connectionTimeoutMillis: 10_000,
+  });
+}
+
+function pooled(url: string): Pool {
+  const pools = (globalForDb.__wingRatePools ??= new Map<string, Pool>());
+  let pool = pools.get(url);
+  if (!pool) {
+    pool = makePool(url);
+    pools.set(url, pool);
+  }
+  return pool;
+}
+
+/**
+ * Connect (or reuse the cached pool) for an explicit Postgres URL — used by
+ * the Postgres rate store, which may target a different database than the
+ * env-configured one. Never throws at import time.
+ */
+export function connectPostgres(url: string): { db: Db; pool: Pool } {
+  const pool = pooled(url);
+  return { db: drizzle(pool, { schema }), pool };
+}
 
 export function getPool(): Pool | null {
   if (!databaseUrl) return null;
-  if (!globalForDb.__wingRatePool) {
-    globalForDb.__wingRatePool = new Pool({
-      connectionString: databaseUrl,
-      ssl: isLocal ? undefined : { rejectUnauthorized: false },
-      max: 3,
-      idleTimeoutMillis: 20_000,
-      connectionTimeoutMillis: 10_000,
-    });
-  }
-  return globalForDb.__wingRatePool;
+  return pooled(databaseUrl);
 }
 
 const pool = getPool();
