@@ -140,6 +140,17 @@ bash scripts/update-rates.sh    # curls /api/cron/update-rate every 5 min
 | `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather — powers `/rate`, alerts, webhook |
 | `NEXT_PUBLIC_SITE_URL` | Public URL used for links inside alerts |
 | `CRON_SECRET` | Optional — protects `/api/cron/update-rate` (`Bearer <secret>`) |
+| `TELEGRAM_WEBHOOK_SECRET` | Optional — when set, `/api/bot/webhook` only accepts updates carrying this `X-Telegram-Bot-Api-Secret-Token` (register it with `setWebhook&secret_token=…`) |
+| `TELEGRAM_API_URL` | Optional — Bot API base, defaults to `https://api.telegram.org` (useful behind a proxy) |
+| `TELEGRAM_TIMEOUT_MS` | Optional — per-request Telegram timeout, default `10000` |
+
+> **Telegram alerts work with any storage backend.** Alert settings and bot
+> subscriptions are read/written through the same storage layer as the price
+> history (Postgres · Turso · MongoDB · Upstash/Redis · Vercel Blob · memory),
+> so `/api/telegram/settings`, `/api/telegram/test`, `/api/bot/webhook` and the
+> automatic rate alerts no longer require PostgreSQL specifically. Without any
+> database they still work for the lifetime of the process — connect one to make
+> them permanent.
 
 ---
 

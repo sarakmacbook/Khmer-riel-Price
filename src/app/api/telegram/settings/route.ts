@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db, hasDatabase } from '@/db';
-import { telegramAlerts } from '@/db/schema';
-import { desc, eq } from 'drizzle-orm';
-import { ensurePostgresSchema } from '@/lib/ensure-schema';
-import { storeBackend } from '@/lib/history-store';
+import { getStoreOrMemory } from '@/lib/store';
+import { errMsg } from '@/lib/store/types';
+import { getWebAlert, normalizeAlertInput, saveWebAlert } from '@/lib/alerts';
+import { TOKEN_MASK, isUsableSecret } from '@/lib/telegram';
 
 export const dynamic = 'force-dynamic';
 
@@ -13,27 +12,35 @@ const DEFAULTS = {
   webhookUrl: '',
   chatId: '',
   botToken: '',
+  hasToken: false,
   condition: 'change',
   targetRate: '',
+  lastAlertAt: null as number | null,
+  storage: '',
+  persistent: false,
 };
 
+/**
+ * Read the dashboard's Telegram alert.
+ *
+ * Works with ANY configured storage (Postgres, Turso, MongoDB, Upstash/Redis,
+ * Vercel Blob, memory) through the RateStore abstraction — it used to answer
+ * "not configured" on everything except Postgres, which silently broke the
+ * whole Telegram panel on those deployments.
+ *
+ * The stored token is never returned; only `hasToken`.
+ */
 export async function GET() {
   try {
-    if (!hasDatabase || storeBackend() !== 'postgres') return NextResponse.json(DEFAULTS);
-    await ensurePostgresSchema();
-    const alert = await db.query.telegramAlerts.findFirst({
-      orderBy: [desc(telegramAlerts.id)],
-    });
+    const store = await getStoreOrMemory();
+    const alert = await getWebAlert(store);
 
     if (!alert) {
       return NextResponse.json({
-        configured: false,
-        active: false,
-        webhookUrl: '',
-        chatId: '',
-        botToken: '',
-        condition: 'change',
-        targetRate: '',
+        ...DEFAULTS,
+        hasToken: isUsableSecret(process.env.TELEGRAM_BOT_TOKEN),
+        storage: store.label,
+        persistent: store.persistent,
       });
     }
 
@@ -42,57 +49,52 @@ export async function GET() {
       active: alert.active,
       webhookUrl: alert.webhookUrl || '',
       chatId: alert.chatId || '',
-      botToken: alert.botToken ? '••••••••' : '',
-      hasToken: Boolean(alert.botToken || process.env.TELEGRAM_BOT_TOKEN),
+      // Never echo the real token back to the browser.
+      botToken: '',
+      hasToken: isUsableSecret(alert.botToken) || isUsableSecret(process.env.TELEGRAM_BOT_TOKEN),
       condition: alert.condition,
       targetRate: alert.targetRate ? alert.targetRate.toString() : '',
       lastAlertAt: alert.lastAlertAt,
+      storage: store.label,
+      persistent: store.persistent,
     });
-  } catch {
-    // Table missing / DB unreachable — report "not configured" instead of 500.
-    return NextResponse.json(DEFAULTS);
+  } catch (e) {
+    // Store unreachable — report "not configured" instead of a 500, but say why.
+    return NextResponse.json({ ...DEFAULTS, error: errMsg(e) });
   }
 }
 
 export async function POST(req: NextRequest) {
   try {
-    if (!hasDatabase || storeBackend() !== 'postgres') {
-      return NextResponse.json(
-        { success: false, error: 'Telegram subscriber storage needs a Postgres database (Neon/Supabase/Vercel Postgres).' },
-        { status: 400 },
-      );
-    }
-    await ensurePostgresSchema();
-    const body = await req.json();
-    const { webhookUrl, chatId, botToken, condition, targetRate, active } = body;
+    const store = await getStoreOrMemory();
+    const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
 
-    // Find latest row or insert new
-    const existing = await db.query.telegramAlerts.findFirst({
-      orderBy: [desc(telegramAlerts.id)],
+    let input;
+    try {
+      input = normalizeAlertInput(body);
+    } catch (e) {
+      return NextResponse.json({ success: false, error: errMsg(e) }, { status: 400 });
+    }
+
+    // Only a real token replaces the stored one: an absent field or the UI mask
+    // ("••••••••") means "keep what you already have".
+    const rawToken = typeof body.botToken === 'string' ? body.botToken.trim() : '';
+    const botToken = isUsableSecret(rawToken) && rawToken !== TOKEN_MASK ? rawToken : undefined;
+
+    const saved = await saveWebAlert(store, { ...input, botToken });
+
+    return NextResponse.json({
+      success: true,
+      configured: true,
+      active: saved.active,
+      hasToken: isUsableSecret(saved.botToken) || isUsableSecret(process.env.TELEGRAM_BOT_TOKEN),
+      storage: store.label,
+      persistent: store.persistent,
+      warning: store.persistent
+        ? undefined
+        : `${store.label} does not persist across restarts — connect a database to keep these alert settings.`,
     });
-
-    const valuesToUpdate: Record<string, any> = {
-      webhookUrl: webhookUrl || null,
-      chatId: chatId || null,
-      condition: condition || 'change',
-      targetRate: targetRate ? targetRate.toString() : null,
-      active: typeof active === 'boolean' ? active : true,
-    };
-
-    if (botToken && botToken !== '••••••••') {
-      valuesToUpdate.botToken = botToken;
-    }
-
-    if (existing) {
-      await db.update(telegramAlerts)
-        .set(valuesToUpdate)
-        .where(eq(telegramAlerts.id, existing.id));
-    } else {
-      await db.insert(telegramAlerts).values(valuesToUpdate);
-    }
-
-    return NextResponse.json({ success: true });
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (e) {
+    return NextResponse.json({ success: false, error: errMsg(e) }, { status: 500 });
   }
 }

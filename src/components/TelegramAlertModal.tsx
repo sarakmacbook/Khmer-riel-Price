@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from 'react';
-import { Send, X, Check, AlertCircle, RefreshCw, Bell, Radio, ExternalLink } from 'lucide-react';
+import { Send, X, Check, AlertCircle, RefreshCw, Bell, KeyRound, Info } from 'lucide-react';
 
 interface TelegramAlertModalProps {
   isOpen: boolean;
@@ -10,11 +10,25 @@ interface TelegramAlertModalProps {
   currentAsk: number | null;
 }
 
+interface Settings {
+  configured?: boolean;
+  active?: boolean;
+  webhookUrl?: string;
+  chatId?: string;
+  /** Never sent by the API — only `hasToken` tells us a token exists. */
+  botToken?: string;
+  hasToken?: boolean;
+  condition?: 'change' | 'above' | 'below';
+  targetRate?: string;
+  storage?: string;
+  persistent?: boolean;
+  error?: string;
+}
+
 export default function TelegramAlertModal({
   isOpen,
   onClose,
   currentBid,
-  currentAsk,
 }: TelegramAlertModalProps) {
   const [configMode, setConfigMode] = useState<'webhook' | 'bot'>('webhook');
   const [webhookUrl, setWebhookUrl] = useState('');
@@ -24,39 +38,63 @@ export default function TelegramAlertModal({
   const [targetRate, setTargetRate] = useState('');
   const [active, setActive] = useState(true);
 
+  const [hasToken, setHasToken] = useState(false);
+  const [storage, setStorage] = useState('');
+  const [persistent, setPersistent] = useState(true);
+  const [loadError, setLoadError] = useState('');
+
   const [loadingInitial, setLoadingInitial] = useState(true);
   const [testState, setTestState] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [testMessage, setTestMessage] = useState('');
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
+  const [saveError, setSaveError] = useState('');
 
   // Load existing settings
   useEffect(() => {
     if (!isOpen) return;
     setTestState('idle');
     setSaveState('idle');
+    setSaveError('');
+    setLoadError('');
+    setLoadingInitial(true);
 
+    let cancelled = false;
     fetch('/api/telegram/settings')
       .then((res) => res.json())
-      .then((data) => {
+      .then((data: Settings) => {
+        if (cancelled) return;
+        setHasToken(Boolean(data.hasToken));
+        setStorage(data.storage || '');
+        setPersistent(data.persistent !== false);
+        setLoadError(data.error || '');
         if (data.configured) {
           setWebhookUrl(data.webhookUrl || '');
           setChatId(data.chatId || '');
-          setBotToken(data.botToken || '');
+          // A saved token is never returned; leaving this blank keeps it.
+          setBotToken('');
           setCondition(data.condition || 'change');
           setTargetRate(data.targetRate || '');
           setActive(data.active ?? true);
-          if (data.webhookUrl && !data.chatId) {
-            setConfigMode('webhook');
-          } else if (data.chatId) {
-            setConfigMode('bot');
-          }
+          setConfigMode(data.chatId ? 'bot' : 'webhook');
         }
       })
-      .catch((err) => console.error('Failed to load telegram settings', err))
-      .finally(() => setLoadingInitial(false));
+      .catch((err) => {
+        if (!cancelled) setLoadError(err?.message || 'Could not load alert settings');
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingInitial(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [isOpen]);
 
   if (!isOpen) return null;
+
+  const trimmedChat = chatId.trim();
+  const trimmedUrl = webhookUrl.trim();
+  const targetMissing = condition !== 'change' && !targetRate.trim();
+  const canSendTest = !targetMissing && (configMode === 'webhook' ? Boolean(trimmedUrl) : Boolean(trimmedChat));
 
   const handleSendTest = async () => {
     setTestState('loading');
@@ -65,44 +103,63 @@ export default function TelegramAlertModal({
       const res = await fetch('/api/telegram/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        // An empty token means "use the saved one / TELEGRAM_BOT_TOKEN".
+        // In webhook mode the Chat ID is deliberately omitted so the test goes
+        // through the webhook instead of the saved bot.
         body: JSON.stringify({
-          webhookUrl: configMode === 'webhook' ? webhookUrl : null,
-          botToken: configMode === 'bot' ? botToken : null,
-          chatId: chatId,
+          mode: configMode,
+          webhookUrl: configMode === 'webhook' ? trimmedUrl : null,
+          botToken: configMode === 'bot' ? botToken.trim() || null : null,
+          chatId: configMode === 'bot' ? trimmedChat || null : null,
         }),
       });
 
       const data = await res.json();
       if (!res.ok || !data.success) {
         setTestState('error');
-        setTestMessage(data.error || 'Failed to send alert');
+        setTestMessage(data.error || `Failed to send alert (HTTP ${res.status})`);
       } else {
         setTestState('success');
-        setTestMessage('Test alert successfully sent to Telegram!');
+        setTestMessage(
+          data.used?.tokenSource
+            ? `Test alert sent — used ${data.used.tokenSource}.`
+            : 'Test alert successfully sent to Telegram!',
+        );
       }
-    } catch (err: any) {
+    } catch (err) {
       setTestState('error');
-      setTestMessage(err.message || 'Network error');
+      setTestMessage(err instanceof Error ? err.message : 'Network error');
     }
   };
 
   const handleSave = async () => {
     setSaveState('saving');
+    setSaveError('');
     try {
+      // Exactly one delivery channel is stored: in webhook mode the Chat ID is
+      // cleared (otherwise the saved bot token would win over the webhook), and
+      // in bot mode the webhook URL is cleared.
+      const payload: Record<string, unknown> = {
+        webhookUrl: configMode === 'webhook' ? trimmedUrl : null,
+        chatId: configMode === 'bot' ? trimmedChat || null : null,
+        condition,
+        targetRate: targetRate.trim() || null,
+        active,
+      };
+      // Omitted entirely when blank → the server keeps the token already stored.
+      if (botToken.trim()) payload.botToken = botToken.trim();
+
       const res = await fetch('/api/telegram/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          webhookUrl: configMode === 'webhook' ? webhookUrl : null,
-          chatId: chatId || null,
-          botToken: configMode === 'bot' ? botToken : null,
-          condition,
-          targetRate: targetRate || null,
-          active,
-        }),
+        body: JSON.stringify(payload),
       });
+      const data = await res.json().catch(() => ({}));
 
-      if (res.ok) {
+      if (res.ok && data.success) {
+        if (botToken.trim()) setHasToken(true);
+        setStorage(data.storage || storage);
+        setPersistent(data.persistent !== false);
         setSaveState('saved');
         setTimeout(() => {
           setSaveState('idle');
@@ -110,11 +167,11 @@ export default function TelegramAlertModal({
         }, 1200);
       } else {
         setSaveState('idle');
-        alert('Failed to save settings');
+        setSaveError(data.error || `Failed to save settings (HTTP ${res.status})`);
       }
     } catch (err) {
       setSaveState('idle');
-      console.error(err);
+      setSaveError(err instanceof Error ? err.message : 'Network error');
     }
   };
 
@@ -152,6 +209,13 @@ export default function TelegramAlertModal({
           </div>
         ) : (
           <div className="py-5 space-y-5">
+            {loadError && (
+              <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-300 flex items-start gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-amber-400" />
+                <span>Could not read saved settings: {loadError}</span>
+              </div>
+            )}
+
             {/* Active Toggle */}
             <div className="flex items-center justify-between p-3.5 rounded-2xl bg-black/30 border border-white/10">
               <div className="flex items-center gap-2.5">
@@ -199,7 +263,7 @@ export default function TelegramAlertModal({
                       : 'text-slate-400 hover:text-slate-200'
                   }`}
                 >
-                  Telegram Bot & Chat ID
+                  Telegram Bot &amp; Chat ID
                 </button>
               </div>
             </div>
@@ -237,20 +301,28 @@ export default function TelegramAlertModal({
                     className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-2.5 text-xs text-white placeholder-slate-500 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   />
                   <p className="text-[11px] text-slate-500 mt-1">
-                    Start your bot on Telegram or send <code>/start</code> to discover your Chat ID.
+                    Send <code>/start</code> to your bot — it replies with your Chat ID.
                   </p>
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-slate-300 mb-1">
                     Bot Token <span className="text-slate-500">(Optional if configured on VPS / .env)</span>
                   </label>
-                  <input
-                    type="password"
-                    value={botToken}
-                    onChange={(e) => setBotToken(e.target.value)}
-                    placeholder="123456789:ABCdefGHIjklMNOpqrSTUvwxYZ"
-                    className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-2.5 text-xs text-white placeholder-slate-500 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  />
+                  <div className="relative">
+                    <KeyRound className="h-3.5 w-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+                    <input
+                      type="password"
+                      value={botToken}
+                      onChange={(e) => setBotToken(e.target.value)}
+                      placeholder={hasToken ? 'Saved — leave blank to keep it' : '123456789:ABCdefGHIjklMNOpqrSTUvwxYZ'}
+                      className="w-full bg-black/40 border border-white/10 rounded-xl pl-9 pr-4 py-2.5 text-xs text-white placeholder-slate-500 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+                  {hasToken && !botToken.trim() && (
+                    <p className="text-[11px] text-indigo-300/80 mt-1">
+                      A bot token is already saved for this deployment — it will be used.
+                    </p>
+                  )}
                 </div>
               </div>
             )}
@@ -314,15 +386,31 @@ export default function TelegramAlertModal({
 
             {/* Test Status feedback */}
             {testState === 'success' && (
-              <div className="p-3 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-xs text-indigo-300 flex items-center gap-2">
-                <Check className="h-4 w-4 shrink-0 text-indigo-400" />
+              <div className="p-3 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-xs text-indigo-300 flex items-start gap-2">
+                <Check className="h-4 w-4 shrink-0 mt-0.5 text-indigo-400" />
                 <span>{testMessage}</span>
               </div>
             )}
             {testState === 'error' && (
-              <div className="p-3 rounded-xl bg-slate-800 border border-white/10 text-xs text-rose-300 flex items-center gap-2">
-                <AlertCircle className="h-4 w-4 shrink-0 text-rose-400" />
-                <span className="truncate">{testMessage}</span>
+              <div className="p-3 rounded-xl bg-slate-800 border border-white/10 text-xs text-rose-300 flex items-start gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-rose-400" />
+                <span className="break-words">{testMessage}</span>
+              </div>
+            )}
+            {saveError && (
+              <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300 flex items-start gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-rose-400" />
+                <span className="break-words">{saveError}</span>
+              </div>
+            )}
+
+            {!persistent && storage && (
+              <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-300 flex items-start gap-2">
+                <Info className="h-4 w-4 shrink-0 mt-0.5 text-amber-400" />
+                <span>
+                  Storage is <b>{storage}</b>: alerts work now but are not saved across restarts. Connect a database
+                  (Postgres, Turso, MongoDB, Upstash Redis or Vercel Blob) to make them permanent.
+                </span>
               </div>
             )}
 
@@ -339,7 +427,7 @@ export default function TelegramAlertModal({
               <button
                 type="button"
                 onClick={handleSendTest}
-                disabled={testState === 'loading' || (configMode === 'webhook' && !webhookUrl) || (configMode === 'bot' && !chatId)}
+                disabled={testState === 'loading' || !canSendTest}
                 className="flex-1 py-3 px-4 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed text-xs font-semibold text-slate-200 transition-all flex items-center justify-center gap-2"
               >
                 {testState === 'loading' ? (

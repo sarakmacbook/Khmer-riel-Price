@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
 import { fetchWingBankQuote } from '@/lib/scraper';
 import { getLatestTick, saveTick, storeBackend } from '@/lib/history-store';
 import { ensurePostgresSchema } from '@/lib/ensure-schema';
-import { sendTelegramWebhookAlert } from '@/lib/telegram';
+import { notifyRateChange } from '@/lib/alerts';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
@@ -24,53 +23,21 @@ export async function GET(req: NextRequest) {
     const prevBid = previous?.bid ?? null;
     const bidChanged = prevBid !== null && prevBid !== quote.bid;
 
+    // Automatic Telegram delivery. Goes through the RateStore abstraction, so
+    // subscribers are honoured on Postgres, Turso, MongoDB, Upstash/Redis,
+    // Vercel Blob and memory alike (it used to require Postgres and silently
+    // skip on everything else).
     let notified = 0;
+    let matched = 0;
+    let alertError: string | undefined;
     if (bidChanged || !previous) {
-      // Telegram alert delivery requires Postgres-backed subscriber storage;
-      // on other store types this is skipped gracefully.
-      try {
-        const { telegramAlerts } = await import('@/db/schema');
-        const { eq } = await import('drizzle-orm');
-        const activeAlerts = await db.query.telegramAlerts.findMany({
-          where: eq(telegramAlerts.active, true),
-        });
-
-        for (const alert of activeAlerts) {
-          let shouldNotify = alert.condition === 'change' || !alert.condition;
-          if (alert.condition === 'above' && alert.targetRate) {
-            shouldNotify = quote.bid >= parseFloat(alert.targetRate);
-          } else if (alert.condition === 'below' && alert.targetRate) {
-            shouldNotify = quote.bid <= parseFloat(alert.targetRate);
-          }
-          if (!shouldNotify) continue;
-
-          const diff = prevBid ? quote.bid - prevBid : 0;
-          const arrow = diff > 0 ? '🟢 ↗' : diff < 0 ? '🔴 ↘' : '⚪ ➔';
-          const msg =
-            `📢 <b>Wing Bank Exchange Rate Update</b>\n\n` +
-            `• <b>Bank Buys (Bid):</b> ${quote.bid.toLocaleString()} KHR ${prevBid ? `(${arrow} ${diff >= 0 ? '+' : ''}${diff})` : ''}\n` +
-            `• <b>Bank Sells (Ask):</b> ${quote.ask.toLocaleString()} KHR\n` +
-            `• <b>Time:</b> ${new Date().toLocaleTimeString()}\n\n` +
-            `🔗 <a href="${process.env.NEXT_PUBLIC_SITE_URL || 'https://wingrate.app'}">Open WingRate Live Chart</a>`;
-
-          const res = await sendTelegramWebhookAlert({
-            webhookUrl: alert.webhookUrl,
-            botToken: alert.botToken,
-            chatId: alert.chatId,
-            text: msg,
-          });
-          if (res.success) notified += 1;
-
-          try {
-            await db.update(telegramAlerts).set({ lastAlertAt: new Date() }).where(eq(telegramAlerts.id, alert.id));
-          } catch {
-            /* ignore */
-          }
-        }
-      } catch (err) {
-        // No Postgres for alert storage — fine on Turso/Upstash/memory.
-        if (storeBackend() === 'postgres') console.error('telegram alerts skipped:', err);
-      }
+      const res = await notifyRateChange(prevBid, quote).catch((e: unknown) => {
+        console.error('[cron] telegram alerts failed:', e instanceof Error ? e.message : String(e));
+        return { matched: 0, delivered: 0, error: e instanceof Error ? e.message : String(e) };
+      });
+      matched = res.matched;
+      notified = res.delivered;
+      alertError = res.error;
     }
 
     return NextResponse.json({
@@ -78,10 +45,15 @@ export async function GET(req: NextRequest) {
       ...quote,
       previousBid: prevBid,
       changed: bidChanged,
+      matched,
       notified,
+      alertError,
       store: storeBackend(),
     });
-  } catch (error: any) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+  } catch (error) {
+    return NextResponse.json(
+      { success: false, error: error instanceof Error ? error.message : String(error) },
+      { status: 500 },
+    );
   }
 }
