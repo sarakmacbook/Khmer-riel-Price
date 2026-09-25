@@ -35,6 +35,8 @@ export interface AlertRecord {
   botToken: string | null;
   condition: AlertCondition;
   targetRate: number | null;
+  /** Optional custom message template (supports {bid} {ask} {diff} {arrow} {time} {link}). Null = default template. */
+  customMessage: string | null;
   active: boolean;
   createdAt: number;
   lastAlertAt: number | null;
@@ -107,6 +109,7 @@ export function dailyFromPoints(points: Point[]): Point[] {
 }
 
 export function toAlertRecord(a: AlertInput, id: string, now = Date.now()): AlertRecord {
+  const customMessage = typeof a.customMessage === 'string' ? a.customMessage.trim() : '';
   return {
     id,
     source: a.source ?? 'web',
@@ -115,6 +118,8 @@ export function toAlertRecord(a: AlertInput, id: string, now = Date.now()): Aler
     botToken: a.botToken ?? null,
     condition: a.condition ?? 'change',
     targetRate: a.targetRate ?? null,
+    // Normalise to null so "blank = use the default template" holds everywhere.
+    customMessage: customMessage || null,
     active: a.active ?? true,
     createdAt: a.createdAt ?? now,
     lastAlertAt: a.lastAlertAt ?? null,

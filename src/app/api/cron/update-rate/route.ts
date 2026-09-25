@@ -22,16 +22,19 @@ export async function GET(req: NextRequest) {
 
     const prevBid = previous?.bid ?? null;
     const bidChanged = prevBid !== null && prevBid !== quote.bid;
+    // The price "moved" only when there IS a previous quote AND it differs
+    // (bid or ask). No previous quote (fresh/empty history) = no move = no alert.
+    const priceMoved = previous !== null && (previous.bid !== quote.bid || previous.ask !== quote.ask);
 
-    // Automatic Telegram delivery. Goes through the RateStore abstraction, so
-    // subscribers are honoured on Postgres, Turso, MongoDB, Upstash/Redis,
-    // Vercel Blob and memory alike (it used to require Postgres and silently
-    // skip on everything else).
+    // Automatic Telegram delivery — only when the price actually moved.
+    // Goes through the RateStore abstraction, so subscribers are honoured on
+    // Postgres, Turso, MongoDB, Upstash/Redis, Vercel Blob and memory alike
+    // (it used to require Postgres and silently skip on everything else).
     let notified = 0;
     let matched = 0;
     let alertError: string | undefined;
-    if (bidChanged || !previous) {
-      const res = await notifyRateChange(prevBid, quote).catch((e: unknown) => {
+    if (priceMoved) {
+      const res = await notifyRateChange(previous, quote).catch((e: unknown) => {
         console.error('[cron] telegram alerts failed:', e instanceof Error ? e.message : String(e));
         return { matched: 0, delivered: 0, error: e instanceof Error ? e.message : String(e) };
       });
@@ -45,6 +48,7 @@ export async function GET(req: NextRequest) {
       ...quote,
       previousBid: prevBid,
       changed: bidChanged,
+      moved: priceMoved,
       matched,
       notified,
       alertError,

@@ -20,6 +20,7 @@ interface Settings {
   hasToken?: boolean;
   condition?: 'change' | 'above' | 'below';
   targetRate?: string;
+  customMessage?: string;
   storage?: string;
   persistent?: boolean;
   error?: string;
@@ -36,6 +37,7 @@ export default function TelegramAlertModal({
   const [botToken, setBotToken] = useState('');
   const [condition, setCondition] = useState<'change' | 'above' | 'below'>('change');
   const [targetRate, setTargetRate] = useState('');
+  const [customMessage, setCustomMessage] = useState('');
   const [active, setActive] = useState(true);
 
   const [hasToken, setHasToken] = useState(false);
@@ -74,6 +76,7 @@ export default function TelegramAlertModal({
           setBotToken('');
           setCondition(data.condition || 'change');
           setTargetRate(data.targetRate || '');
+          setCustomMessage(data.customMessage || '');
           setActive(data.active ?? true);
           setConfigMode(data.chatId ? 'bot' : 'webhook');
         }
@@ -111,6 +114,8 @@ export default function TelegramAlertModal({
           webhookUrl: configMode === 'webhook' ? trimmedUrl : null,
           botToken: configMode === 'bot' ? botToken.trim() || null : null,
           chatId: configMode === 'bot' ? trimmedChat || null : null,
+          // The test previews this exact template, so the form value wins.
+          customMessage: customMessage.trim() || null,
         }),
       });
 
@@ -144,6 +149,7 @@ export default function TelegramAlertModal({
         chatId: configMode === 'bot' ? trimmedChat || null : null,
         condition,
         targetRate: targetRate.trim() || null,
+        customMessage: customMessage.trim() || null,
         active,
       };
       // Omitted entirely when blank → the server keeps the token already stored.
@@ -342,7 +348,7 @@ export default function TelegramAlertModal({
                       : 'border-white/10 bg-black/30 text-slate-400 hover:text-slate-200'
                   }`}
                 >
-                  On Rate Change
+                  Only on Price Move
                 </button>
                 <button
                   type="button"
@@ -368,6 +374,13 @@ export default function TelegramAlertModal({
                 </button>
               </div>
 
+              {condition === 'change' && (
+                <p className="text-[11px] text-slate-500 mt-2 leading-relaxed">
+                  Sends an alert <b className="text-slate-400">only when the Wing Bank rate actually moves</b> (buy
+                  or sell price changes, up or down) — never on the same price twice.
+                </p>
+              )}
+
               {condition !== 'change' && (
                 <div className="mt-3">
                   <label className="block text-xs font-medium text-slate-300 mb-1">
@@ -382,6 +395,27 @@ export default function TelegramAlertModal({
                   />
                 </div>
               )}
+            </div>
+
+            {/* Custom alert message */}
+            <div>
+              <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
+                Custom Alert Message <span className="text-slate-500 normal-case font-medium">(Optional)</span>
+              </label>
+              <textarea
+                value={customMessage}
+                onChange={(e) => setCustomMessage(e.target.value.slice(0, 1200))}
+                rows={3}
+                placeholder="e.g. 🇰🇭 Riel moved! Bid {bid} / Ask {ask} KHR ({arrow} {diff}) — {time}"
+                className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-2.5 text-xs text-white placeholder-slate-500 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-y leading-relaxed"
+              />
+              <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
+                Leave blank for the default message. Codes you can use:{' '}
+                <code className="text-slate-400">{'{bid}'}</code> <code className="text-slate-400">{'{ask}'}</code>{' '}
+                <code className="text-slate-400">{'{diff}'}</code> <code className="text-slate-400">{'{arrow}'}</code>{' '}
+                <code className="text-slate-400">{'{time}'}</code> <code className="text-slate-400">{'{link}'}</code>{' '}
+                <span className="text-slate-600">(max 1200 characters)</span>
+              </p>
             </div>
 
             {/* Test Status feedback */}

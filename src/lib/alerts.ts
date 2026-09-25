@@ -27,12 +27,22 @@ export function hasDeliveryTarget(alert: Pick<AlertRecord, 'chatId' | 'webhookUr
   return Boolean(normalizeChatId(alert.chatId) || (alert.webhookUrl ?? '').trim());
 }
 
+/** Max length of a user-supplied alert message (Telegram allows 4096). */
+export const CUSTOM_MESSAGE_MAX = 1200;
+
+/**
+ * Placeholders a user can drop into a custom alert message.
+ * Shown in the UI and used by renderAlertMessage().
+ */
+export const CUSTOM_MESSAGE_PLACEHOLDERS = ['{bid}', '{ask}', '{diff}', '{arrow}', '{time}', '{link}'] as const;
+
 /** Validate/clean the fields coming from the dashboard form. Throws on bad input. */
 export function normalizeAlertInput(body: Record<string, unknown>): {
   webhookUrl: string | null;
   chatId: string | null;
   condition: AlertInput['condition'];
   targetRate: number | null;
+  customMessage: string | null;
   active: boolean;
 } {
   const rawUrl = typeof body.webhookUrl === 'string' ? body.webhookUrl.trim() : '';
@@ -71,18 +81,27 @@ export function normalizeAlertInput(body: Record<string, unknown>): {
     throw new Error('Enter a Telegram Chat ID (Bot mode) or a Webhook URL.');
   }
 
+  // Optional custom message — blank keeps the default template.
+  const rawMessage = typeof body.customMessage === 'string' ? body.customMessage.trim() : '';
+  if (rawMessage.length > CUSTOM_MESSAGE_MAX) {
+    throw new Error(`Custom message is too long (max ${CUSTOM_MESSAGE_MAX} characters).`);
+  }
+
   return {
     webhookUrl,
     chatId,
     condition,
     targetRate,
+    customMessage: rawMessage || null,
     active: typeof body.active === 'boolean' ? body.active : true,
   };
 }
 
 export async function saveWebAlert(
   store: RateStore,
-  input: Pick<AlertRecord, 'webhookUrl' | 'chatId' | 'condition' | 'targetRate' | 'active'> & { botToken?: string | null },
+  input: Pick<AlertRecord, 'webhookUrl' | 'chatId' | 'condition' | 'targetRate' | 'customMessage' | 'active'> & {
+    botToken?: string | null;
+  },
 ) {
   const existing = await getWebAlert(store);
   return store.saveAlert({
@@ -95,6 +114,7 @@ export async function saveWebAlert(
     botToken: input.botToken === undefined ? (existing?.botToken ?? null) : input.botToken,
     condition: input.condition,
     targetRate: input.targetRate,
+    customMessage: input.customMessage,
     active: input.active,
     lastAlertAt: existing?.lastAlertAt ?? null,
   });
@@ -105,12 +125,66 @@ export async function setChatSubscription(store: RateStore, chatId: string, acti
   const existing = (await store.listAlerts()).find((a) => a.source === 'bot' && a.chatId === chatId);
   if (!existing && !active) return null;
   return store.saveAlert({
-    ...(existing ?? { webhookUrl: null, botToken: null, condition: 'change' as const, targetRate: null, lastAlertAt: null }),
+    ...(existing ?? {
+      webhookUrl: null,
+      botToken: null,
+      condition: 'change' as const,
+      targetRate: null,
+      customMessage: null,
+      lastAlertAt: null,
+    }),
     id: existing?.id,
     source: 'bot',
     chatId,
     active,
   });
+}
+
+/** HTML-escape user text so a custom message can never break Telegram's HTML parse_mode. */
+const escapeHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+export interface AlertMessageInput {
+  /** Previous quote, or null when there is none (first tick / unknown). */
+  prev: { bid: number; ask: number } | null;
+  quote: WingBankQuote;
+  /** User template from the alert, or null for the default layout. */
+  customMessage?: string | null;
+}
+
+/**
+ * Build the final Telegram message for a quote.
+ *
+ * - Custom message: the user's template, HTML-escaped, with the placeholders
+ *   {bid} {ask} {rate} {diff} {arrow} {time} {link} replaced by live values.
+ * - No custom message: the standard WingRate rate-update layout.
+ */
+export function renderAlertMessage({ prev, quote, customMessage }: AlertMessageInput): string {
+  const siteUrl = process.env.SITE_URL || process.env.NEXT_PUBLIC_SITE_URL;
+  const diff = prev ? quote.bid - prev.bid : 0;
+  const arrow = diff > 0 ? '🟢 ↗' : diff < 0 ? '🔴 ↘' : '⚪ ➔';
+  const signed = `${diff >= 0 ? '+' : ''}${diff}`;
+  const linkHtml = siteUrl ? `🔗 <a href="${siteUrl}">Open WingRate Live Chart</a>` : '';
+
+  const custom = (customMessage ?? '').trim();
+  if (custom) {
+    return escapeHtml(custom)
+      .replace(/\{bid\}/gi, quote.bid.toLocaleString())
+      .replace(/\{ask\}/gi, quote.ask.toLocaleString())
+      .replace(/\{rate\}/gi, quote.bid.toLocaleString())
+      .replace(/\{diff\}/gi, signed)
+      .replace(/\{arrow\}/gi, arrow)
+      .replace(/\{time\}/gi, new Date().toUTCString())
+      .replace(/\{link\}/gi, linkHtml);
+  }
+
+  return (
+    `📢 <b>Wing Bank Exchange Rate Update</b>\n\n` +
+    `• <b>Bank Buys (Bid):</b> ${quote.bid.toLocaleString()} KHR` +
+    (prev ? ` (${arrow} ${signed})` : '') +
+    `\n• <b>Bank Sells (Ask):</b> ${quote.ask.toLocaleString()} KHR\n` +
+    `• <b>Time:</b> ${new Date().toUTCString()}` +
+    (siteUrl ? `\n\n${linkHtml}` : '')
+  );
 }
 
 export interface NotifyResult {
@@ -126,23 +200,18 @@ export interface NotifyResult {
  * Notify every active Telegram alert whose condition matches the new quote.
  * Works on every storage backend (Postgres, Turso, MongoDB, Upstash/Redis,
  * Vercel Blob, memory) because it goes through the RateStore abstraction.
+ *
+ * **Alerts fire only when the price actually moved** (bid or ask differs from
+ * the previous quote). When there is no previous quote (first tick, empty or
+ * reset history) nothing is sent — an alert can only react to a real move.
  */
-export async function notifyRateChange(prevBid: number | null, quote: WingBankQuote): Promise<NotifyResult> {
+export async function notifyRateChange(prev: { bid: number; ask: number } | null, quote: WingBankQuote): Promise<NotifyResult> {
   const store = await getStoreOrMemory();
   const alerts = (await store.listAlerts()).filter((a) => a.active && hasDeliveryTarget(a));
   if (alerts.length === 0) return { matched: 0, delivered: 0 };
 
-  const siteUrl = process.env.SITE_URL || process.env.NEXT_PUBLIC_SITE_URL;
-  const diff = prevBid !== null ? quote.bid - prevBid : 0;
-  const arrow = diff > 0 ? '🟢 ↗' : diff < 0 ? '🔴 ↘' : '⚪ ➔';
-
-  const text =
-    `📢 <b>Wing Bank Exchange Rate Update</b>\n\n` +
-    `• <b>Bank Buys (Bid):</b> ${quote.bid.toLocaleString()} KHR` +
-    (prevBid !== null ? ` (${arrow} ${diff >= 0 ? '+' : ''}${diff})` : '') +
-    `\n• <b>Bank Sells (Ask):</b> ${quote.ask.toLocaleString()} KHR\n` +
-    `• <b>Time:</b> ${new Date().toUTCString()}` +
-    (siteUrl ? `\n\n🔗 <a href="${siteUrl}">Open WingRate Live Chart</a>` : '');
+  const moved = prev !== null && (prev.bid !== quote.bid || prev.ask !== quote.ask);
+  if (!moved) return { matched: 0, delivered: 0 };
 
   const results = await Promise.all(
     alerts.map(async (alert) => {
@@ -152,9 +221,11 @@ export async function notifyRateChange(prevBid: number | null, quote: WingBankQu
           ? target !== null && quote.bid >= target
           : alert.condition === 'below'
             ? target !== null && quote.bid <= target
-            : true; // 'change'
+            : true; // 'change' — the price moved (checked above)
       if (!shouldNotify) return { matched: false, delivered: false, error: undefined as string | undefined };
 
+      // Each alert renders its own message: the saved custom template, or the default layout.
+      const text = renderAlertMessage({ prev, quote, customMessage: alert.customMessage });
       const res = await sendTelegramWebhookAlert({
         webhookUrl: alert.webhookUrl,
         botToken: alert.botToken,

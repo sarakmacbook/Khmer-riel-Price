@@ -21,6 +21,8 @@ export const telegramAlerts = pgTable('telegram_alerts', {
   botToken: text('bot_token'),
   condition: text('condition').default('change').notNull(), // 'change' | 'above' | 'below'
   targetRate: numeric('target_rate', { precision: 12, scale: 4 }),
+  /** Optional custom alert message template ({bid} {ask} {diff} {arrow} {time} {link}). Null = default. */
+  customMessage: text('custom_message'),
   active: boolean('active').default(true).notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   lastAlertAt: timestamp('last_alert_at'),
