@@ -32,11 +32,13 @@ CREATE TABLE IF NOT EXISTS telegram_alerts (
   bot_token    TEXT,
   condition    TEXT NOT NULL DEFAULT 'change',
   target_rate  NUMERIC(12,4),
+  custom_message TEXT,
   active       BOOLEAN NOT NULL DEFAULT true,
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   last_alert_at TIMESTAMPTZ
 );
 ALTER TABLE telegram_alerts ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'web';
+ALTER TABLE telegram_alerts ADD COLUMN IF NOT EXISTS custom_message TEXT;
 CREATE INDEX IF NOT EXISTS telegram_alerts_active_idx
   ON telegram_alerts (active);
 `;

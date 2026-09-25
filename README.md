@@ -12,7 +12,7 @@ Real-time **USD/KHR exchange rate tracker** scraped from **[Wing Bank](https://w
 - 🧮 **Tiny calculator** — `Sell Ads` / `Buy Ads` unit-price converter: divides your KHR amount by the live Wing Bank ask/bid price (opens at `40` KHR)
 - 📲 **PWA** — add to home screen on **Android & iPhone** (manifest + service worker + icon)
 - 🔔 **Browser notifications** — fire the moment the bank rate moves
-- 🤖 **Telegram** — bot commands + webhook alerts (`on change` / `above` / `below`), configured from the UI next to the bell icon
+- 🤖 **Telegram** — bot commands + webhook alerts (`only on price move` / `rate above` / `rate below`), with a **custom alert message** template, configured from the UI next to the bell icon
 - ⏱ **All-time tick history** in PostgreSQL, written by a background cron every 5 minutes
 - ▲ **Vercel-deployable** and **Docker-compose** self-hostable
 
@@ -151,6 +151,14 @@ bash scripts/update-rates.sh    # curls /api/cron/update-rate every 5 min
 > automatic rate alerts no longer require PostgreSQL specifically. Without any
 > database they still work for the lifetime of the process — connect one to make
 > them permanent.
+
+> **Alerts fire only when the price actually moves** — a notification is sent
+> when the Wing Bank buy **or** sell rate changes (up or down), never on the
+> same price twice and never on the very first tick (there is no previous
+> price to compare). **Custom messages**: in the bell menu you can replace the
+> default layout with your own text (max 1200 chars) using the codes
+> `{bid}` `{ask}` `{diff}` `{arrow}` `{time}` `{link}` — leave it blank for the
+> standard message, and use *Send Test Alert* to preview exactly what you'll receive.
 
 ---
 

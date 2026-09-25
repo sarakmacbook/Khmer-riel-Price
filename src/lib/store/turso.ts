@@ -48,8 +48,8 @@ const SCHEMA: Stmt[] = [
   {
     sql: `CREATE TABLE IF NOT EXISTS telegram_alerts (
       id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL DEFAULT 'web', webhook_url TEXT, chat_id TEXT,
-      bot_token TEXT, condition TEXT NOT NULL DEFAULT 'change', target_rate REAL, active INTEGER NOT NULL DEFAULT 1,
-      created_at INTEGER NOT NULL, last_alert_at INTEGER)`,
+      bot_token TEXT, condition TEXT NOT NULL DEFAULT 'change', target_rate REAL, custom_message TEXT,
+      active INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, last_alert_at INTEGER)`,
   },
 ];
 
@@ -65,6 +65,7 @@ const toAlert = (r: Record<string, Value>): AlertRecord => ({
   botToken: (r.bot_token as string) ?? null,
   condition: ((r.condition as string) ?? 'change') as AlertRecord['condition'],
   targetRate: r.target_rate === null || r.target_rate === undefined ? null : Number(r.target_rate),
+  customMessage: (r.custom_message as string) ?? null,
   active: Number(r.active) === 1,
   createdAt: Number(r.created_at),
   lastAlertAt: r.last_alert_at === null || r.last_alert_at === undefined ? null : Number(r.last_alert_at),
@@ -119,6 +120,16 @@ export class TursoStore implements RateStore {
 
   async init() {
     await this.pipeline(SCHEMA);
+    // SQLite has no `ADD COLUMN IF NOT EXISTS` — migrate databases created
+    // before the custom_message column existed.
+    try {
+      const cols = await this.one(`SELECT name FROM pragma_table_info('telegram_alerts')`);
+      if (!cols.some((c) => c.name === 'custom_message')) {
+        await this.pipeline([{ sql: `ALTER TABLE telegram_alerts ADD COLUMN custom_message TEXT` }]);
+      }
+    } catch (e) {
+      console.warn('[turso] custom_message migration skipped:', e instanceof Error ? e.message : e);
+    }
   }
 
   async latest() {
@@ -184,16 +195,16 @@ export class TursoStore implements RateStore {
 
   async saveAlert(a: AlertInput) {
     const v = toAlertRecord(a, a.id ?? '');
-    const cols = [v.source, v.webhookUrl, v.chatId, v.botToken, v.condition, v.targetRate, v.active ? 1 : 0, v.lastAlertAt];
+    const cols = [v.source, v.webhookUrl, v.chatId, v.botToken, v.condition, v.targetRate, v.customMessage, v.active ? 1 : 0, v.lastAlertAt];
     const [row] = a.id
       ? await this.one(
-          `UPDATE telegram_alerts SET source=?, webhook_url=?, chat_id=?, bot_token=?, condition=?, target_rate=?, active=?, last_alert_at=?
+          `UPDATE telegram_alerts SET source=?, webhook_url=?, chat_id=?, bot_token=?, condition=?, target_rate=?, custom_message=?, active=?, last_alert_at=?
            WHERE id=? RETURNING *`,
           [...cols, Number(a.id)],
         )
       : await this.one(
-          `INSERT INTO telegram_alerts (source, webhook_url, chat_id, bot_token, condition, target_rate, active, last_alert_at, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+          `INSERT INTO telegram_alerts (source, webhook_url, chat_id, bot_token, condition, target_rate, custom_message, active, last_alert_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
           [...cols, v.createdAt],
         );
     return toAlert(row);

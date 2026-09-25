@@ -37,11 +37,13 @@ CREATE TABLE IF NOT EXISTS telegram_alerts (
   bot_token     text,
   condition     text NOT NULL DEFAULT 'change',
   target_rate   numeric(12, 4),
+  custom_message text,
   active        boolean NOT NULL DEFAULT true,
   created_at    timestamp NOT NULL DEFAULT now(),
   last_alert_at timestamp
 );
 ALTER TABLE telegram_alerts ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'web';
+ALTER TABLE telegram_alerts ADD COLUMN IF NOT EXISTS custom_message text;
 `;
 
 type Row = typeof exchangeRates.$inferSelect;
@@ -63,6 +65,7 @@ const toAlert = (a: AlertRow): AlertRecord => ({
   botToken: a.botToken,
   condition: (a.condition as AlertRecord['condition']) ?? 'change',
   targetRate: a.targetRate ? parseFloat(a.targetRate) : null,
+  customMessage: a.customMessage ?? null,
   active: a.active,
   createdAt: a.createdAt.getTime(),
   lastAlertAt: a.lastAlertAt ? a.lastAlertAt.getTime() : null,
@@ -169,6 +172,7 @@ export class PostgresStore implements RateStore {
       botToken: v.botToken,
       condition: v.condition,
       targetRate: v.targetRate !== null ? String(v.targetRate) : null,
+      customMessage: v.customMessage,
       active: v.active,
       lastAlertAt: v.lastAlertAt ? new Date(v.lastAlertAt) : null,
     };

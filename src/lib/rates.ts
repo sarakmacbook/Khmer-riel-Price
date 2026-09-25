@@ -46,8 +46,10 @@ export function refreshRate(): Promise<LatestRate> {
 async function recordIn(store: RateStore, q: { bid: number; ask: number }, now: number) {
   const res = await store.record(q, now);
   g.__wingrateCache = { kind: store.kind, row: res.row, readAt: Date.now() };
+  // res.changed is true only when the price differs from the stored one;
+  // res.prev guards the first tick — alerts fire only on a real price move.
   if (res.prev && res.changed && store.persistent) {
-    await notifyRateChange(res.prev.bid, { ...q, rate: q.bid, fetchedAt: new Date(now).toISOString() }).catch((e) =>
+    await notifyRateChange(res.prev, { ...q, rate: q.bid, fetchedAt: new Date(now).toISOString() }).catch((e) =>
       console.error('[alerts]', errMsg(e)),
     );
   }

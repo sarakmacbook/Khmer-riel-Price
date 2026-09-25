@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { sendTelegramWebhookAlert, isUsableSecret, normalizeChatId } from '@/lib/telegram';
 import { getStoreOrMemory } from '@/lib/store';
-import { effectiveBotToken, getWebAlert } from '@/lib/alerts';
+import { effectiveBotToken, getWebAlert, renderAlertMessage } from '@/lib/alerts';
 import { fetchWingBankQuote } from '@/lib/scraper';
+import { getLatestTick } from '@/lib/history-store';
 
 export const dynamic = 'force-dynamic';
 
@@ -75,13 +76,17 @@ export async function POST(req: NextRequest) {
       quote = { rate: 4054, bid: 4054, ask: 4062, fetchedAt: new Date().toISOString() };
     }
 
+    // Preview exactly what the user will receive: their custom template (form
+    // value wins, then the stored one) or the default layout, with live values.
+    const formCustomMessage = str(body.customMessage);
+    const prevTick = await getLatestTick().catch(() => null);
+    const prev = prevTick ? { bid: Number(prevTick.bid), ask: Number(prevTick.ask) } : null;
+
     const now = new Date().toLocaleTimeString();
     const testMessage =
       `🔔 <b>WingRate Test Alert</b> (${now})\n\n` +
-      `🇰🇭 <b>USD / KHR Exchange Rate:</b>\n` +
-      `• <b>Bank Buys (Bid):</b> ${quote.bid.toLocaleString()} KHR\n` +
-      `• <b>Bank Sells (Ask):</b> ${quote.ask.toLocaleString()} KHR\n\n` +
-      `✅ <i>Telegram Webhook connection is working properly!</i>`;
+      `✅ <i>Connection OK — this is a preview of your alert message:</i>\n\n` +
+      renderAlertMessage({ prev, quote, customMessage: formCustomMessage || stored?.customMessage || null });
 
     const result = await sendTelegramWebhookAlert({
       webhookUrl,
