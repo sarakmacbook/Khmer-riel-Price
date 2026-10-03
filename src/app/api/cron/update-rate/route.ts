@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { fetchWingBankQuote } from '@/lib/scraper';
 import { getLatestTick, saveTick, storeBackend } from '@/lib/history-store';
-import { ensurePostgresSchema } from '@/lib/ensure-schema';
 import { notifyRateChange } from '@/lib/alerts';
 
 export const dynamic = 'force-dynamic';
@@ -14,7 +13,8 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    if (storeBackend() === 'postgres') await ensurePostgresSchema();
+    // The active store creates its own schema/keys on first use (Postgres,
+    // Turso, MongoDB, Redis, Blob) — including a database connected at runtime.
     const previous = await getLatestTick().catch(() => null);
     const quote = await fetchWingBankQuote();
 

@@ -146,6 +146,26 @@ export class PostgresStore implements RateStore {
     return r ? toPoint(r) : null;
   }
 
+  /** Bulk-insert historical points (used when seeding a freshly connected database). */
+  async backfill(points: Point[]) {
+    const sorted = [...points].sort((a, b) => a.t - b.t);
+    let written = 0;
+    for (let i = 0; i < sorted.length; i += 200) {
+      const chunk = sorted.slice(i, i + 200);
+      await this.db.insert(exchangeRates).values(
+        chunk.map((p) => ({
+          rate: String(p.bid),
+          bid: String(p.bid),
+          ask: String(p.ask),
+          timestamp: new Date(p.t),
+          checkedAt: new Date(p.t),
+        })),
+      );
+      written += chunk.length;
+    }
+    return written;
+  }
+
   async daily(since: number | null) {
     const where = since !== null ? sql`WHERE "timestamp" >= ${new Date(since).toISOString()}` : sql``;
     const offset = sql.raw(`interval '${TZ_OFFSET_HOURS} hours'`);

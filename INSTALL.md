@@ -35,12 +35,32 @@ Add the following:
 DATABASE_URL=postgresql://postgres:postgres@db:5432/app_db
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
 NEXT_PUBLIC_SITE_URL=https://your-domain.com
+
+# Optional — 🗄 database menu in Telegram
+TELEGRAM_ADMIN_CHAT_ID=          # only this chat may change the database
+DB_CONFIG_FILE=/app/.data/wingrate-db.json   # where the choice is remembered
+ADMIN_SECRET=change-me           # protects POST/DELETE /api/database
 ```
 
 ### 3. Launch with Docker Compose
 ```bash
 docker-compose up -d --build
 ```
+
+### 3b. 🗄 Connect any database later (no rebuild)
+
+The bot ships with a database menu, so you are **not stuck** with the Postgres
+container from `docker-compose.yml`:
+
+1. Send `/database` to your bot.
+2. Tap **🔌 Connect database** → pick Postgres / Turso / MongoDB / Upstash / Redis / Vercel Blob.
+3. Paste the connection string (e.g. `postgresql://user:pass@host:5432/db`).
+
+The new database is tested first (tables are created automatically), then the
+site, chart, cron and alerts switch to it immediately. **🧪 Test connection**
+re-checks the current one and **⏏️ Disconnect** returns to the environment
+database (or to memory). The choice is stored in the `app_data` volume, so it
+survives `docker-compose up -d --build`.
 
 ### 4. Set up Telegram Webhook
 To make the bot work, you must tell Telegram where to send messages:

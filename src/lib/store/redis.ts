@@ -1,4 +1,4 @@
-import { type RedisTransport, pairs } from './redis-client';
+import { type RedisArg, type RedisTransport, pairs } from './redis-client';
 import {
   type AlertInput,
   type AlertRecord,
@@ -118,6 +118,32 @@ export class RedisStore implements RateStore {
       .map(toPoint)
       .filter((p) => since === null || p.t >= since);
     return all.sort((a, b) => a.t - b.t);
+  }
+
+  /** Bulk-insert historical points (used when seeding a freshly connected database). */
+  async backfill(points: Point[]) {
+    const sorted = [...points].sort((a, b) => a.t - b.t);
+    if (sorted.length === 0) return 0;
+
+    const point = (p: Point) => JSON.stringify({ bid: p.bid, ask: p.ask, t: p.t });
+    for (let i = 0; i < sorted.length; i += 100) {
+      const args: RedisArg[] = [];
+      for (const p of sorted.slice(i, i + 100)) args.push(String(p.t), point(p));
+      await this.r.cmd('ZADD', this.k('rates'), ...args);
+    }
+
+    // "daily" holds the last price of each local day (same contract as record()).
+    const perDay = new Map<string, Point>();
+    for (const p of sorted) perDay.set(dayKey(p.t), p);
+    const hashArgs: RedisArg[] = [];
+    for (const [day, p] of perDay) hashArgs.push(day, point(p));
+    if (hashArgs.length) await this.r.cmd('HSET', this.k('daily'), ...hashArgs);
+
+    const last = sorted[sorted.length - 1];
+    if (last) {
+      await this.r.cmd('SET', this.k('latest'), JSON.stringify({ bid: last.bid, ask: last.ask, t: last.t, c: last.t }));
+    }
+    return sorted.length;
   }
 
   async listAlerts() {

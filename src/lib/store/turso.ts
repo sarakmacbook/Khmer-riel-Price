@@ -189,6 +189,23 @@ export class TursoStore implements RateStore {
     return rows.map(toPoint);
   }
 
+  /** Bulk-insert historical points (used when seeding a freshly connected database). */
+  async backfill(points: Point[]) {
+    const sorted = [...points].sort((a, b) => a.t - b.t);
+    let written = 0;
+    for (let i = 0; i < sorted.length; i += 100) {
+      const chunk = sorted.slice(i, i + 100);
+      await this.pipeline(
+        chunk.map((p) => ({
+          sql: 'INSERT INTO exchange_rates (bid, ask, ts, checked_at) VALUES (?, ?, ?, ?)',
+          args: [p.bid, p.ask, p.t, p.t] as Value[],
+        })),
+      );
+      written += chunk.length;
+    }
+    return written;
+  }
+
   async listAlerts() {
     return (await this.one('SELECT * FROM telegram_alerts ORDER BY id ASC')).map(toAlert);
   }

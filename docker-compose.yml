@@ -21,6 +21,14 @@ services:
     environment:
       DATABASE_URL: postgresql://postgres:postgres@db:5432/app_db
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      # Optional: only these chats may use the Telegram /database menu.
+      # TELEGRAM_ADMIN_CHAT_ID: ${TELEGRAM_ADMIN_CHAT_ID:-}
+      # Where the database picked in Telegram is remembered (survives restarts).
+      DB_CONFIG_FILE: /app/.data/wingrate-db.json
+      # Optional: protect POST/DELETE /api/database with this secret.
+      # ADMIN_SECRET: ${ADMIN_SECRET:-}
+    volumes:
+      - app_data:/app/.data
     depends_on:
       - db
 
@@ -40,3 +48,4 @@ services:
 
 volumes:
   postgres_data:
+  app_data:

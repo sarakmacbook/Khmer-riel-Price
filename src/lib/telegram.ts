@@ -81,7 +81,29 @@ function describeFailure(res: TelegramResponse, what: string): string {
 export interface SendTelegramMessageResult {
   success: boolean;
   error?: string;
+  /** Telegram message id (sendMessage only) — kept so menus can be edited in place. */
+  messageId?: number;
 }
+
+/** One button of an inline keyboard. */
+export interface InlineKeyboardButton {
+  text: string;
+  callback_data?: string;
+  url?: string;
+}
+
+/** Rows of buttons (Telegram's `reply_markup.inline_keyboard`). */
+export type InlineKeyboard = InlineKeyboardButton[][];
+
+export interface SendMessageOptions {
+  keyboard?: InlineKeyboard;
+  /** Hide the link preview card for messages containing URLs (default true). */
+  linkPreview?: boolean;
+  /** Send silently (no notification sound). */
+  silent?: boolean;
+}
+
+const replyMarkup = (keyboard?: InlineKeyboard) => (keyboard ? { inline_keyboard: keyboard } : undefined);
 
 /**
  * Send one message with an explicit bot token. This is the lowest-level call —
@@ -91,6 +113,7 @@ export async function sendTelegramMessage(
   botToken: string,
   chatId: string,
   text: string,
+  options: SendMessageOptions = {},
 ): Promise<SendTelegramMessageResult> {
   const token = (botToken ?? '').trim();
   const chat = normalizeChatId(chatId);
@@ -106,8 +129,72 @@ export async function sendTelegramMessage(
     chat_id: chat,
     text,
     parse_mode: 'HTML',
+    link_preview_options: { is_disabled: options.linkPreview !== false },
+    ...(options.silent ? { disable_notification: true } : {}),
+    ...(options.keyboard ? { reply_markup: replyMarkup(options.keyboard) } : {}),
   });
 
+  if (!res.ok) return { success: false, error: describeFailure(res, 'Telegram API error') };
+  const messageId = (res.data?.result as { message_id?: number } | undefined)?.message_id;
+  return { success: true, messageId };
+}
+
+/**
+ * Edit a previous message (menus are edited in place instead of spamming the chat).
+ * "message is not modified" means the user tapped the same button twice — that is a success.
+ */
+export async function editTelegramMessage(
+  botToken: string,
+  chatId: string,
+  messageId: number,
+  text: string,
+  options: SendMessageOptions = {},
+): Promise<SendTelegramMessageResult> {
+  const token = (botToken ?? '').trim();
+  if (!isUsableSecret(token)) return { success: false, error: 'No bot token available.' };
+
+  const res = await postJson(`${TELEGRAM_API_BASE}/bot${token}/editMessageText`, {
+    chat_id: normalizeChatId(chatId),
+    message_id: messageId,
+    text,
+    parse_mode: 'HTML',
+    link_preview_options: { is_disabled: options.linkPreview !== false },
+    ...(options.keyboard ? { reply_markup: replyMarkup(options.keyboard) } : {}),
+  });
+
+  if (res.ok) return { success: true, messageId };
+  const description = res.data?.description ?? '';
+  if (/message is not modified/i.test(description)) return { success: true, messageId };
+  return { success: false, error: describeFailure(res, 'Telegram API error') };
+}
+
+/** Remove a message (used to scrub credentials the user pasted into the chat). */
+export async function deleteTelegramMessage(botToken: string, chatId: string, messageId: number): Promise<SendTelegramMessageResult> {
+  const token = (botToken ?? '').trim();
+  if (!isUsableSecret(token)) return { success: false, error: 'No bot token available.' };
+  const res = await postJson(`${TELEGRAM_API_BASE}/bot${token}/deleteMessage`, {
+    chat_id: normalizeChatId(chatId),
+    message_id: messageId,
+  });
+  return res.ok ? { success: true } : { success: false, error: describeFailure(res, 'Telegram API error') };
+}
+
+/**
+ * Acknowledge a button tap. Without this the client shows a loading spinner on
+ * the button for ~10s, and with `show_alert` the text opens as a dialog.
+ */
+export async function answerCallbackQuery(
+  botToken: string,
+  callbackQueryId: string,
+  options: { text?: string; showAlert?: boolean } = {},
+): Promise<SendTelegramMessageResult> {
+  const token = (botToken ?? '').trim();
+  if (!isUsableSecret(token) || !callbackQueryId) return { success: false, error: 'No bot token available.' };
+  const res = await postJson(`${TELEGRAM_API_BASE}/bot${token}/answerCallbackQuery`, {
+    callback_query_id: callbackQueryId,
+    ...(options.text ? { text: options.text.slice(0, 200) } : {}),
+    ...(options.showAlert ? { show_alert: true } : {}),
+  });
   return res.ok ? { success: true } : { success: false, error: describeFailure(res, 'Telegram API error') };
 }
 

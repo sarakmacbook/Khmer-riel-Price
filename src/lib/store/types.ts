@@ -69,6 +69,12 @@ export interface RateStore {
   before(ts: number): Promise<Point | null>;
   /** Last price of each local day with t >= since (or all), ascending. */
   daily(since: number | null): Promise<Point[]>;
+  /**
+   * Optional bulk insert of historical points, used to seed a brand-new
+   * database so a freshly connected chart is not empty. Backends that cannot
+   * batch simply omit it — the seeder then skips that store.
+   */
+  backfill?(points: Point[]): Promise<number>;
 
   listAlerts(): Promise<AlertRecord[]>;
   saveAlert(a: AlertInput): Promise<AlertRecord>;
@@ -128,3 +134,15 @@ export function toAlertRecord(a: AlertInput, id: string, now = Date.now()): Aler
 
 export const num = (v: unknown): number => (typeof v === 'number' ? v : parseFloat(String(v)));
 export const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+/**
+ * Error text with the underlying cause appended. `fetch failed` on its own hides
+ * the useful part (ENOTFOUND, certificate errors, connection refused) which is
+ * exactly what someone pasting a connection string needs to see.
+ */
+export function errDetail(e: unknown): string {
+  const base = errMsg(e);
+  const cause = (e as { cause?: unknown } | null)?.cause;
+  const detail = cause === undefined || cause === null ? '' : cause instanceof Error ? cause.message : String(cause);
+  return detail && !base.includes(detail) ? `${base} (${detail})` : base;
+}

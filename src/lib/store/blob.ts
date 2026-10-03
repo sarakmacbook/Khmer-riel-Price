@@ -166,6 +166,23 @@ export class BlobStore implements RateStore {
       .sort((a, b) => a.t - b.t);
   }
 
+  /** Bulk-insert historical points (used when seeding a freshly connected database). */
+  async backfill(points: Point[]) {
+    const sorted = [...points].sort((a, b) => a.t - b.t);
+    if (sorted.length === 0) return 0;
+    return this.update((d) => {
+      for (const p of sorted) {
+        d.rows.push({ ...p });
+        d.daily[dayKey(p.t)] = { ...p };
+      }
+      d.rows.sort((a, b) => a.t - b.t);
+      if (d.rows.length > MAX_ROWS) d.rows.splice(0, d.rows.length - MAX_ROWS);
+      const last = sorted[sorted.length - 1];
+      if (!d.latest || d.latest.t < last.t) d.latest = { ...last, c: last.t };
+      return { write: true, result: sorted.length };
+    });
+  }
+
   async listAlerts() {
     return (await this.load(true)).alerts;
   }

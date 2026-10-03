@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getStore, lastStoreError } from '@/lib/store';
-import { detectAll, detectStore } from '@/lib/store/env';
-import { errMsg } from '@/lib/store/types';
+import { storeStatus } from '@/lib/store';
+import { maskUrl, redactError } from '@/lib/store/env';
 import { fetchWingBankQuote } from '@/lib/scraper';
 import { REFRESH_MS } from '@/lib/rates';
 
@@ -21,26 +20,34 @@ export async function GET(req: NextRequest) {
   };
 
   // ---- Storage ----
-  const storage: Record<string, unknown> = {};
-  try {
-    const cfg = detectStore();
-    Object.assign(storage, { kind: cfg.kind, label: cfg.label, envVars: cfg.envVars, forced: process.env.STORAGE ?? null });
-  } catch (e) {
-    storage.configError = errMsg(e);
+  // Reports the database actually in use, including one connected at runtime
+  // from the Telegram 🗄 menu (POST /api/database), plus how it was chosen.
+  const s = await storeStatus();
+  const storage: Record<string, unknown> = {
+    kind: s.configuredKind,
+    label: s.activeLabel,
+    envVars: s.detected.find((d) => d.kind === s.configuredKind)?.envVars ?? [],
+    forced: process.env.STORAGE ?? null,
+    mode: s.choice.mode,
+    source: s.source,
+    activeKind: s.activeKind,
+    reachable: s.reachable,
+    persistent: s.persistent,
+    ms: s.ms,
+    stats: s.stats,
+    detected: s.detected.map((c) => ({ kind: c.kind, label: c.label, envVars: c.envVars })),
+    configPath: s.configPath,
+    configWarning: s.configWarning,
+  };
+  if (s.error) storage.error = redactError(s.error);
+  if (s.choice.mode === 'custom') {
+    storage.target = maskUrl(s.choice.spec.url); // masked — never the password
   }
-  storage.detected = detectAll().map((c) => ({ kind: c.kind, label: c.label, envVars: c.envVars }));
-
-  const t = Date.now();
-  try {
-    const store = await getStore();
-    Object.assign(storage, { reachable: true, persistent: store.persistent, ms: 0 });
-    storage.stats = await store.stats();
-    storage.ms = Date.now() - t;
-  } catch (e) {
-    Object.assign(storage, { reachable: false, ms: Date.now() - t, error: errMsg(e) || lastStoreError() });
-  }
-  if (storage.kind === 'memory') {
-    storage.note = 'No database connected — the live rate works; history & saved alerts need any Vercel storage integration.';
+  if (storage.activeKind === 'memory') {
+    storage.note =
+      s.choice.mode === 'memory'
+        ? 'Database disconnected (in-memory store) — the live rate works; history & saved alerts reset on restart.'
+        : 'No database connected — the live rate works; history & saved alerts need any storage integration. Open the Telegram /database menu to connect one.';
   }
   out.storage = storage;
 
