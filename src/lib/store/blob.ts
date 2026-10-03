@@ -202,4 +202,17 @@ export class BlobStore implements RateStore {
     const d = await this.load();
     return { rows: d.rows.length, days: Object.keys(d.daily).length, pathname: this.pathname, bytes: JSON.stringify(d).length };
   }
+  /** Delete stored history and/or alerts (used by "replace" copies). */
+  async wipe(opts: { history?: boolean; alerts?: boolean }) {
+    await this.update((d) => {
+      if (opts.history !== false) {
+        d.rows = [];
+        d.daily = {};
+        d.latest = null;
+      }
+      if (opts.alerts !== false) d.alerts = [];
+      return { write: true, result: undefined };
+    });
+  }
+
 }

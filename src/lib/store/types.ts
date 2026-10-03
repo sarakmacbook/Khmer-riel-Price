@@ -44,6 +44,34 @@ export interface AlertRecord {
 
 export type AlertInput = Omit<AlertRecord, 'id' | 'createdAt'> & { id?: string; createdAt?: number };
 
+// ---------------------------------------------------------------------------
+// Linked (backup) database — see lib/store/linked.ts
+// ---------------------------------------------------------------------------
+
+/** Which of the two linked databases an operation went to. */
+export type LinkSide = 'primary' | 'backup';
+
+/** Behaviour of the link between the primary database and its backup. */
+export interface LinkOptions {
+  /** Write to both databases so the backup is a live copy (default true). */
+  mirror: boolean;
+  /** Serve reads and writes from the backup when the primary is down (default true). */
+  autoFailover: boolean;
+  /** Go back to the primary automatically once it answers again (default true). */
+  autoReturn: boolean;
+  /** After a failover, copy what the backup recorded back into the primary (default true). */
+  autoResync: boolean;
+}
+
+export const DEFAULT_LINK_OPTIONS: LinkOptions = {
+  mirror: true,
+  autoFailover: true,
+  autoReturn: true,
+  autoResync: true,
+};
+
+export const LINK_OPTION_KEYS: (keyof LinkOptions)[] = ['mirror', 'autoFailover', 'autoReturn', 'autoResync'];
+
 export interface RateStore {
   readonly kind: StoreKind;
   /** Human label, e.g. "Postgres (Neon)" */
@@ -75,6 +103,12 @@ export interface RateStore {
    * batch simply omit it — the seeder then skips that store.
    */
   backfill?(points: Point[]): Promise<number>;
+  /**
+   * Optional: delete everything this store holds. Used when copying data onto
+   * a database with "replace" semantics (Backup / copy-data feature). Backends
+   * that cannot delete omit it — the transfer then refuses to replace.
+   */
+  wipe?(opts: { history?: boolean; alerts?: boolean }): Promise<void>;
 
   listAlerts(): Promise<AlertRecord[]>;
   saveAlert(a: AlertInput): Promise<AlertRecord>;

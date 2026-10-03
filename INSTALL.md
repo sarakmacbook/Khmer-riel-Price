@@ -38,8 +38,12 @@ NEXT_PUBLIC_SITE_URL=https://your-domain.com
 
 # Optional — 🗄 database menu in Telegram
 TELEGRAM_ADMIN_CHAT_ID=          # only this chat may change the database
-DB_CONFIG_FILE=/app/.data/wingrate-db.json   # where the choice is remembered
+DB_CONFIG_FILE=/app/.data/wingrate-db.json   # where the choice + backup link are remembered
 ADMIN_SECRET=change-me           # protects POST/DELETE /api/database
+
+# Optional — 🔗 backup database (mirror + automatic failover).
+# Any BACKUP_/SECONDARY_/REPLICA_/FALLBACK_ prefixed name works:
+# BACKUP_DATABASE_URL=postgresql://user:pass@backup-host:5432/app_db
 ```
 
 ### 3. Launch with Docker Compose
@@ -61,6 +65,29 @@ site, chart, cron and alerts switch to it immediately. **🧪 Test connection**
 re-checks the current one and **⏏️ Disconnect** returns to the environment
 database (or to memory). The choice is stored in the `app_data` volume, so it
 survives `docker-compose up -d --build`.
+
+### 3c. 🔗 Keep a second database as a live backup (failover)
+
+Send **`/link <type> <url>`** (or the 🗄 menu → **🔗 Link backup**) to add a
+*second* database next to the one in use:
+
+- every price tick and alert is **mirrored** into it, so it is always current;
+- if the primary stops answering, the very next request is served by the backup
+  (the rate, the chart, the cron and Telegram alerts keep working);
+- the primary is re-checked every 30 s and traffic returns to it automatically,
+  copying back the rows recorded while it was down;
+- **🧬 Sync data** (or `POST /api/database {"action":"sync"}`) copies history +
+  alerts between the two databases at any time — safe to run repeatedly, it
+  never duplicates rows; **⬆️ Promote backup** swaps their roles;
+- **⏏️ Unlink** stops mirroring and deletes nothing.
+
+```bash
+# optional: the same thing over HTTP (ADMIN_SECRET required)
+curl -X POST https://your-domain.com/api/database -H "x-admin-secret: $ADMIN_SECRET" \
+  -H 'content-type: application/json' \
+  -d '{"action":"link","backup":{"kind":"postgres","url":"postgresql://user:pass@backup:5432/app_db"}}'
+curl https://your-domain.com/api/database/link        # health of both databases
+```
 
 ### 4. Set up Telegram Webhook
 To make the bot work, you must tell Telegram where to send messages:

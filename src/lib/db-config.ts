@@ -23,8 +23,13 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { detectKindFromUrl, validateSpec, type DbSpec } from './store/env';
-import type { StoreKind } from './store/types';
+import { detectBackupStore, detectKindFromUrl, validateSpec, type DbSpec } from './store/env';
+import {
+  DEFAULT_LINK_OPTIONS,
+  LINK_OPTION_KEYS,
+  type LinkOptions,
+  type StoreKind,
+} from './store/types';
 
 export type DbMode = 'auto' | 'memory' | 'custom';
 
@@ -43,10 +48,32 @@ export type DbChoice =
       setBy: string | null;
     };
 
+/**
+ * The linked backup database: a second database that mirrors the primary and
+ * takes over when it is down (see lib/store/linked.ts).
+ */
+export interface DbLink {
+  spec: DbSpec;
+  options: LinkOptions;
+  /** Where this link came from (telegram = set from the bot, env = BACKUP_* vars) */
+  source: 'telegram' | 'dashboard' | 'file' | 'env';
+  addedAt: number;
+  addedBy: string | null;
+}
+
+interface LinkDoc {
+  kind?: string;
+  url?: string;
+  token?: string | null;
+  label?: string | null;
+  options?: Partial<LinkOptions>;
+}
+
 interface ConfigDoc {
   v?: number;
   mode?: DbMode;
   spec?: { kind?: string; url?: string; token?: string | null; label?: string | null };
+  link?: LinkDoc | null;
   updatedAt?: number;
   updatedBy?: string | null;
   adminChatId?: string | null;
@@ -68,6 +95,10 @@ const g = globalThis as typeof globalThis & {
   __wingrateChoiceDoc?: ConfigDoc | null;
   /** Promise of the first read so concurrent requests share it. */
   __wingrateChoiceLoad?: Promise<DbChoice> | null;
+  /** Linked backup database (null = none, undefined = not read yet). */
+  __wingrateLink?: DbLink | null;
+  /** Where the cached document came from (for messages). */
+  __wingrateDocSource?: 'file' | 'env';
   __wingrateConfigPath?: string | null;
   __wingrateConfigWarning?: string | null;
 };
@@ -180,18 +211,160 @@ function choiceFromDoc(doc: ConfigDoc | null, source: 'file' | 'env'): DbChoice 
   return null;
 }
 
-function docFromChoice(choice: DbChoice, by: string | null, adminChatId: string | null | undefined): ConfigDoc {
+function docFromChoice(
+  choice: DbChoice,
+  by: string | null,
+  adminChatId: string | null | undefined,
+  link: DbLink | null = null,
+): ConfigDoc {
   const base: ConfigDoc = {
     v: 1,
     mode: choice.mode,
     updatedAt: Date.now(),
     updatedBy: by,
     adminChatId: adminChatId ?? null,
+    link: link ? linkDocFrom(link) : null,
   };
   if (choice.mode === 'custom') {
     base.spec = { kind: choice.spec.kind, url: choice.spec.url, token: choice.spec.token ?? null, label: choice.spec.label ?? null };
   }
   return base;
+}
+
+// ---------------------------------------------------------------------------
+// The linked backup database
+// ---------------------------------------------------------------------------
+
+/** Local hash — only used to key caches, never for secrets. */
+function smallHash(s: string): string {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+
+const asBool = (v: string | undefined): boolean | null => {
+  if (v === undefined) return null;
+  return !/^(0|false|no|off|disable[d]?)$/i.test(v.trim());
+};
+
+/** Link options from the `LINK_*` env vars (missing ones keep the default). */
+export function linkOptionsFromEnv(base: LinkOptions = DEFAULT_LINK_OPTIONS): LinkOptions {
+  return {
+    mirror: asBool(process.env.LINK_MIRROR) ?? base.mirror,
+    autoFailover: asBool(process.env.LINK_AUTO_FAILOVER) ?? base.autoFailover,
+    autoReturn: asBool(process.env.LINK_AUTO_RETURN) ?? base.autoReturn,
+    autoResync: asBool(process.env.LINK_AUTO_RESYNC) ?? base.autoResync,
+  };
+}
+
+/** Accepts booleans, "on"/"off", numbers — anything the API or Telegram may send. */
+export function normalizeLinkOptions(input: unknown, base: LinkOptions = DEFAULT_LINK_OPTIONS): LinkOptions {
+  const out: LinkOptions = { ...base };
+  if (input && typeof input === 'object') {
+    const rec = input as Record<string, unknown>;
+    for (const key of LINK_OPTION_KEYS) {
+      const v = rec[key];
+      if (typeof v === 'boolean') out[key] = v;
+      else if (typeof v === 'number') out[key] = v !== 0;
+      else if (typeof v === 'string') out[key] = asBool(v) ?? out[key];
+    }
+  }
+  return out;
+}
+
+function linkDocFrom(link: DbLink): LinkDoc {
+  return {
+    kind: link.spec.kind,
+    url: link.spec.url,
+    token: link.spec.token ?? null,
+    label: link.spec.label ?? null,
+    options: { ...link.options },
+  };
+}
+
+function linkFromDoc(doc: LinkDoc | null | undefined, source: DbLink['source']): DbLink | null {
+  if (!doc || typeof doc !== 'object') return null;
+  const kind = asKind(doc.kind);
+  const url = String(doc.url ?? '').trim();
+  if (!kind || !url) return null;
+  try {
+    return {
+      spec: validateSpec({ kind, url, token: doc.token ?? null, label: doc.label ?? null }),
+      options: normalizeLinkOptions(doc.options),
+      source,
+      addedAt: g.__wingrateChoiceDoc?.updatedAt ?? 0,
+      addedBy: g.__wingrateChoiceDoc?.updatedBy ?? null,
+    };
+  } catch {
+    return null; // half-written / outdated link → ignore instead of crashing
+  }
+}
+
+/** The backup database described by `DB_BACKUP_JSON` or the BACKUP_ / SECONDARY_ env vars. */
+function envLink(): DbLink | null {
+  const raw = (process.env.DB_BACKUP_JSON ?? process.env.DB_LINK_JSON ?? '').trim();
+  if (raw) {
+    try {
+      const doc = JSON.parse(raw) as LinkDoc & { options?: unknown };
+      const parsed = linkFromDoc({ ...doc, options: normalizeLinkOptions(doc.options, linkOptionsFromEnv()) }, 'env');
+      if (parsed) return parsed;
+    } catch (e) {
+      console.error('[db-config] DB_BACKUP_JSON is not valid JSON:', e instanceof Error ? e.message : e);
+    }
+  }
+
+  let cfg;
+  try {
+    cfg = detectBackupStore();
+  } catch (e) {
+    console.error('[db-config]', e instanceof Error ? e.message : e);
+    return null;
+  }
+  if (!cfg) return null;
+  const url = (cfg.url ?? cfg.token ?? '').trim(); // Vercel Blob: the token IS the value
+  if (!url) return null;
+  try {
+    return {
+      spec: validateSpec({ kind: cfg.kind, url, token: cfg.token ?? null, label: cfg.label }),
+      options: linkOptionsFromEnv(),
+      source: 'env',
+      addedAt: 0,
+      addedBy: null,
+    };
+  } catch (e) {
+    console.error('[db-config] ignoring the backup database from the environment:', e instanceof Error ? e.message : e);
+    return null;
+  }
+}
+
+/** A link worth persisting in the config document (env links stay in the env). */
+function savedLink(): DbLink | null {
+  const link = g.__wingrateLink ?? linkFromDoc(g.__wingrateChoiceDoc?.link, 'file');
+  return link && link.source !== 'env' ? link : null;
+}
+
+/** Cache key: any change to the backup database or its options reconnects the store. */
+export function linkSignature(link: DbLink | null): string {
+  if (!link) return '-';
+  const { kind, url, token } = link.spec;
+  return `${kind}:${smallHash(`${url}|${token ?? ''}`)}:${LINK_OPTION_KEYS.map((k) => (link.options[k] ? '1' : '0')).join('')}`;
+}
+
+/**
+ * The linked backup database, or null when only one database is configured.
+ * Precedence: the saved doc (Telegram/dashboard) → `DB_BACKUP_JSON` → BACKUP_* env vars.
+ */
+export async function loadLink(): Promise<DbLink | null> {
+  if (g.__wingrateLink !== undefined) return g.__wingrateLink;
+  await loadChoice(); // fills __wingrateChoiceDoc from file / DB_CONFIG_JSON
+  const fromFile = linkFromDoc(g.__wingrateChoiceDoc?.link, g.__wingrateDocSource ?? 'file');
+  return (g.__wingrateLink = fromFile ?? envLink());
+}
+
+/** Best-known link without touching the filesystem (diagnostics). */
+export function peekLink(): DbLink | null {
+  if (g.__wingrateLink !== undefined) return g.__wingrateLink;
+  return linkFromDoc(g.__wingrateChoiceDoc?.link, g.__wingrateDocSource ?? 'file') ?? envLink();
 }
 
 // ---------------------------------------------------------------------------
@@ -216,6 +389,7 @@ export function loadChoice(): Promise<DbChoice> {
       if (pinned) {
         doc = pinned;
         source = 'env';
+        g.__wingrateDocSource = 'env';
       }
     }
 
@@ -225,6 +399,7 @@ export function loadChoice(): Promise<DbChoice> {
       if (doc) from = fallback;
     }
 
+    if (doc) g.__wingrateDocSource ??= source === 'env' ? 'env' : 'file';
     g.__wingrateChoiceDoc = doc;
     if (from) g.__wingrateConfigPath = from;
     return choiceFromDoc(doc, source) ?? { mode: 'auto' };
@@ -262,10 +437,26 @@ export function choiceSourceLabel(choice: DbChoice): string {
  * reports `persisted: false` so the caller can warn the user.
  */
 export async function saveChoice(choice: DbChoice, by: string | null = null): Promise<SaveResult> {
+  // Read the document first when this instance never did: rewriting it must not
+  // silently drop a link that a previous session saved to disk.
+  if (g.__wingrateChoiceDoc === undefined) await loadChoice().catch(() => null);
+  return saveChoiceAndLink(choice, savedLink(), by);
+}
+
+/**
+ * Persist the primary choice *and* the linked backup in one document — used by
+ * "promote backup", which swaps the two roles atomically.
+ */
+export async function saveChoiceAndLink(
+  choice: DbChoice,
+  link: DbLink | null,
+  by: string | null = null,
+): Promise<SaveResult> {
   g.__wingrateChoice = choice;
   g.__wingrateChoiceLoad = Promise.resolve(choice);
+  g.__wingrateLink = link;
 
-  const doc = docFromChoice(choice, by, await getAdminChatId());
+  const doc = docFromChoice(choice, by, await getAdminChatId(), link);
   g.__wingrateChoiceDoc = doc;
 
   const { primary, fallback } = configFilePaths();
@@ -287,6 +478,22 @@ export async function saveChoice(choice: DbChoice, by: string | null = null): Pr
     'Mount a writable volume (DB_CONFIG_FILE) or set DB_CONFIG_JSON to keep it.';
   g.__wingrateConfigWarning = warning;
   return { persisted: false, path: null, warning };
+}
+
+/**
+ * Link a backup database (or update the link's options) and remember it.
+ * `loadChoice()` is awaited first so a link saved on a fresh instance keeps the
+ * primary choice that is already on disk / in `DB_CONFIG_JSON`.
+ */
+export async function saveLink(link: DbLink, by: string | null = null): Promise<SaveResult> {
+  const choice = await loadChoice();
+  return saveChoiceAndLink(choice, link, by);
+}
+
+/** Remove the saved link (an env-provided backup database stays configured). */
+export async function clearLink(by: string | null = null): Promise<SaveResult> {
+  const choice = await loadChoice();
+  return saveChoiceAndLink(choice, null, by);
 }
 
 // ---------------------------------------------------------------------------

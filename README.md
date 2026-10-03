@@ -14,6 +14,7 @@ Real-time **USD/KHR exchange rate tracker** scraped from **[Wing Bank](https://w
 - 🔔 **Browser notifications** — fire the moment the bank rate moves
 - 🤖 **Telegram** — bot commands + webhook alerts (`only on price move` / `rate above` / `rate below`), with a **custom alert message** template, configured from the UI next to the bell icon
 - 🗄 **Connect a database from Telegram** — `/database` menu to connect, switch, test or disconnect Postgres · Turso · MongoDB · Upstash · Redis · Vercel Blob at runtime, no redeploy or env edits
+- 🔗 **Backup database & automatic failover** — link a second database (any supported kind): every write is mirrored into it, it takes over within the same request if the primary goes down, and the app returns to the primary automatically — `/link`, `/sync`, `/promote`, or `POST /api/database`
 - ⏱ **All-time tick history** in any supported database, written by a background cron every 5 minutes
 - ▲ **Vercel-deployable** and **Docker-compose** self-hostable
 
@@ -128,9 +129,11 @@ bash scripts/update-rates.sh    # curls /api/cron/update-rate every 5 min
 | GET | `/api/health` | Health check |
 | GET/POST | `/api/telegram/settings` | Read / save Telegram alert configuration |
 | POST | `/api/telegram/test` | Send a test alert to Telegram |
-| GET/POST/DELETE | `/api/database` | Read the active database · connect/switch one · disconnect (writes need `ADMIN_SECRET`/`CRON_SECRET`) |
-| POST | `/api/bot/webhook` | Telegram bot updates — `/start` `/rate` `/alert` `/stop` `/database` `/connect` |
-| GET/POST | `/api/cron/update-rate` | Scrape rate → store tick → fire Telegram alerts |
+| GET/POST/DELETE | `/api/database` | Read the active database · connect/switch one · disconnect · **link/unlink a backup, copy data, promote the backup** (writes need `ADMIN_SECRET`/`CRON_SECRET`) |
+| GET | `/api/database/link` | Backup database health: which side is serving, rows/latency on both, failover counters, sync state (`?fresh=1` forces a real re-check) — safe to poll, no secrets |
+| POST/DELETE | `/api/database/link` | Link a backup database (`{kind,url,token}` + options) · unlink (writes need the admin secret) |
+| POST | `/api/bot/webhook` | Telegram bot updates — `/start` `/rate` `/alert` `/stop` `/database` `/connect` `/link` `/sync` `/promote` `/unlink` |
+| GET/POST | `/api/cron/update-rate` | Scrape rate → store tick → fire Telegram alerts → repair the backup if it fell behind |
 
 ---
 
@@ -149,6 +152,13 @@ bash scripts/update-rates.sh    # curls /api/cron/update-rate every 5 min
 | `DB_CONFIG_FILE` | Optional — file where the database picked in Telegram is remembered, default `<cwd>/.data/wingrate-db.json` |
 | `DB_CONFIG_JSON` | Optional — the same document inline (`{"mode":"custom","spec":{"kind":"postgres","url":"…","token":"…"}}`) for read-only filesystems / serverless. A saved config file wins over it |
 | `ADMIN_SECRET` | Optional — secret required by `POST`/`DELETE /api/database` (`x-admin-secret` header or `Bearer`). Without it (or `CRON_SECRET`), changing the database over HTTP is disabled and only Telegram can do it |
+| `BACKUP_DATABASE_URL`, `SECONDARY_*`, `REPLICA_*`, `FALLBACK_*` | Optional — a **second database** described purely by env vars (e.g. `BACKUP_DATABASE_URL`, `SECONDARY_TURSO_DATABASE_URL` + `SECONDARY_TURSO_AUTH_TOKEN`, `FALLBACK_MONGODB_URI`). Detected separately from the primary, so `BACKUP_DATABASE_URL` never becomes the primary by accident |
+| `DB_BACKUP_JSON` | Optional — the linked backup inline for read-only filesystems: `{"kind":"postgres","url":"postgresql://…","options":{"mirror":true}}` |
+| `LINK_MIRROR` / `LINK_AUTO_FAILOVER` / `LINK_AUTO_RETURN` / `LINK_AUTO_RESYNC` | Optional — turn individual link behaviours off (`0`/`false`) |
+| `LINK_PROBE_SECONDS` | Optional — how often a failed primary is re-checked while the backup serves, default `30` |
+| `LINK_STATUS_TTL_MS` | Optional — cache for the two-sided status probe, default `5000` |
+| `LINK_COPY_LIMIT` / `LINK_RESYNC_LIMIT` | Optional — max history rows per manual copy (default `20000`) and per automatic catch-up (default `5000`) |
+| `LINK_MAX_LAG_SECONDS` | Optional — how far behind the backup may get before the cron repairs it, default `900` |
 
 > **Telegram alerts work with any storage backend.** Alert settings and bot
 > subscriptions are read/written through the same storage layer as the price
@@ -288,6 +298,85 @@ saved config file`) and where the choice is saved.
 
 ---
 
+## 🔗 Backup database + automatic failover
+
+A deployment can use **two** databases instead of one:
+
+```
+        every write                        primary down?
+  app ─────────────▶  primary  ◀── probe ── 30s
+   │                    (Neon)                 │  yes → serve from the backup
+   └─────────────▶  backup   ◀─────────────────┘         (same request)
+                     (Turso)
+```
+
+| Action | How |
+| ------ | --- |
+| Link a backup | `/link <type> <url> [token]` (alias `/backup`), the 🗄 menu → **🔗 Link backup**, or `POST /api/database {"action":"link","backup":{…}}` |
+| See the state | `/database` → “🔗 Backup database”, `GET /api/database/link`, `GET /api/status` |
+| Copy data | `/sync [to\|from\|auto]`, the menu → **🧬 Sync data**, or `POST /api/database {"action":"sync"}` |
+| Make it primary | `/promote` or `POST /api/database {"action":"promote"}` (swaps the two roles, keeps both databases' data) |
+| Stop mirroring | `/unlink` or `DELETE /api/database?link=1` — **nothing is deleted on either side** |
+
+**How it behaves**
+
+- 🪞 **Live copy** — with `mirror` on (default), every tick and alert is written
+  to both databases, so the second one is always current and can be used
+  directly, not just in an emergency.
+- ⚡ **Same-request failover** — a request that the primary fails is retried on
+  the backup (read *and* write): the live rate, the chart, the cron and Telegram
+  alerts keep working during an outage.
+- ↩️ **Automatic return + catch-up** — the primary is re-probed (default every
+  30 s); as soon as it answers, traffic goes back and the rows/alerts that were
+  written to the backup are copied back into it (`autoResync`). The 5-minute
+  cron also repairs a backup that missed writes.
+- 🧬 **Sync any two databases** — `POST /api/database` with
+  `{"action":"sync","from":{…},"to":{…}}` copies history + alerts between two
+  arbitrary databases (e.g. moving an old Postgres into a new Turso before
+  switching over). Copies are **idempotent** (matched on timestamp/price and on
+  the alert's chat/condition/target), so running one twice never duplicates
+  anything; `"mode":"replace"` clears the target first, and `"dryRun":true`
+  reports what a copy would do without touching it.
+- 🛟 **A broken backup can never break the app** — mirror failures are logged and
+  skipped (they never fail the request); if *both* databases are down the app
+  falls back to the in-memory store, exactly as it does today.
+- 🔒 **Same protection as the rest of the database menu** — owner-only in
+  Telegram, admin secret over HTTP, connection strings always masked (a Vercel
+  Blob token *is* a connection string, so it is masked too).
+
+```bash
+# link a second database (Neon) as the backup, copy this database into it,
+# and keep every future write mirrored into both
+curl -X POST https://your-app.vercel.app/api/database \
+  -H "x-admin-secret: $ADMIN_SECRET" -H 'content-type: application/json' \
+  -d '{"action":"link",
+       "backup":{"kind":"postgres","url":"postgresql://user:pass@ep-x.eu-central-1.aws.neon.tech/backup"},
+       "options":{"mirror":true,"autoFailover":true,"autoReturn":true,"autoResync":true},
+       "syncNow":true}'
+
+# health of both databases (no secret needed, no credentials returned)
+curl https://your-app.vercel.app/api/database/link
+
+# copy / reconcile the two databases (idempotent), or plan it first
+curl -X POST https://your-app.vercel.app/api/database \
+  -H "x-admin-secret: $ADMIN_SECRET" -H 'content-type: application/json' \
+  -d '{"action":"sync","target":"auto","dryRun":true}'
+
+# swap roles: the backup becomes the primary database
+curl -X POST https://your-app.vercel.app/api/database \
+  -H "x-admin-secret: $ADMIN_SECRET" -H 'content-type: application/json' \
+  -d '{"action":"promote"}'
+```
+
+> **No env vars needed.** Linking works entirely at runtime (Telegram or API)
+> and is remembered in the same config document as the primary choice
+> (`DB_CONFIG_FILE` / `.data/wingrate-db.json`, or `DB_CONFIG_JSON` on
+> serverless). Env-only deployments can instead set `BACKUP_DATABASE_URL` (or
+> any `SECONDARY_*` / `REPLICA_*` / `FALLBACK_*` var) or `DB_BACKUP_JSON` —
+> see the table below.
+
+---
+
 ## 🗂 Project structure
 
 ```
@@ -304,10 +393,30 @@ src/
   lib/
     scraper.ts              ← Wing Bank scraper (cheerio)
     telegram.ts             ← Telegram send helpers (messages, buttons, callbacks)
-    bot-database.ts         ← 🗄 Telegram database menu (connect/switch/test/disconnect)
-    db-config.ts            ← runtime database choice: file / DB_CONFIG_JSON / ownership
-    db-actions.ts           ← connect · disconnect · test (shared by bot & API)
+    bot-database.ts         ← 🗄 Telegram database menu (connect/switch/test/disconnect + 🔗 backup)
+    db-config.ts            ← runtime database choice: file / DB_CONFIG_JSON / ownership / linked backup
+    db-actions.ts           ← connect · disconnect · test · link backup · sync · promote
+    link-jobs.ts            ← cron caretaker: failover catch-up + mirror repair
     store/                  ← storage layer: postgres · turso · mongodb · redis · blob · memory
+    store/linked.ts         ← two databases joined: mirror, failover, auto-return, re-sync
+    store/transfer.ts       ← copying history + alerts between databases (idempotent)
+```
+
+---
+
+## 🧪 Tests
+
+The backup/failover feature ships with two runnable checks (no database
+account needed — they use the in-memory and a local HTTP store):
+
+```bash
+npm run test:link          # 59 checks: env scoping, mirroring, failover, auto-return,
+                           # catch-up, idempotent/merge/replace copies, masking
+
+node scripts/fake-blob-server.mjs &   # stands in for a cloud store over HTTP
+npm run test:link:live                # 25 checks end to end: two real HTTP-backed
+                                      # databases, one killed mid-flight → the other serves,
+                                      # the first recovers → traffic returns and data is copied back
 ```
 
 ---

@@ -186,6 +186,14 @@ export class MongoStore implements RateStore {
     return { ...rest, id: res.insertedId.toHexString() };
   }
 
+  /** Delete stored history and/or alerts (used by "replace" copies). */
+  async wipe(opts: { history?: boolean; alerts?: boolean }) {
+    if (opts.history !== false) await this.rates.deleteMany({});
+    if (opts.alerts !== false) await this.alerts.deleteMany({});
+    // The daily-materialisation cache is derived from the rows; drop it too.
+    if (opts.history !== false) await this.meta.deleteMany({ _id: { $in: ['daily', 'latest'] } as never });
+  }
+
   async stats() {
     const [rows, first, last] = await Promise.all([
       this.rates.estimatedDocumentCount(),

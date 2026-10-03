@@ -1,10 +1,23 @@
-import { loadChoice, peekChoice, choiceSourceLabel, lastConfigPath, lastConfigWarning, type DbChoice } from '@/lib/db-config';
-import { MEMORY_CONFIG, configFromSpec, detectAll, detectStore, type StoreConfig } from './env';
+import {
+  loadChoice,
+  loadLink,
+  linkSignature,
+  peekChoice,
+  choiceSourceLabel,
+  lastConfigPath,
+  lastConfigWarning,
+  type DbChoice,
+  type DbLink,
+} from '@/lib/db-config';
+import { MEMORY_CONFIG, configFromSpec, detectAll, detectStore, maskTarget, type StoreConfig } from './env';
 import { MemoryStore } from './memory';
-import { errDetail, errMsg, type RateStore, type StoreKind } from './types';
+import { createLinkedStore, linkStateOf, type LinkCounters, type LinkState, type SideState } from './linked';
+import { describeStore } from './transfer';
+import { errDetail, errMsg, type LinkOptions, type LinkSide, type RateStore, type StoreKind } from './types';
 
-export type { RateStore, RateRow, Point, AlertRecord, AlertInput, StoreKind } from './types';
+export type { RateStore, RateRow, Point, AlertRecord, AlertInput, StoreKind, LinkOptions, LinkSide } from './types';
 export type { StoreConfig } from './env';
+export type { LinkCounters, LinkState, SideState } from './linked';
 
 interface CacheEntry {
   /** Hash of the config, so switching databases (or servers) makes a new instance. */
@@ -19,6 +32,8 @@ const g = globalThis as typeof globalThis & {
   __wingrateStoreError?: string | null;
   /** Kind of the store instance that was actually created (may be memory fallback). */
   __wingrateActive?: { kind: StoreKind; label: string; sig: string } | null;
+  /** Short-lived memo of the two-sided link probe. */
+  __wingrateLinkProbe?: { sig: string; at: number; promise: Promise<LinkStatus | null> } | null;
 };
 
 /** Non-cryptographic hash — only used to detect config changes, never for secrets. */
@@ -28,7 +43,9 @@ function hash(s: string): string {
   return h.toString(36);
 }
 
-const sigOf = (cfg: StoreConfig) => `${cfg.kind}:${cfg.token ? 't' : '-'}:${hash(`${cfg.url ?? ''}|${cfg.token ?? ''}`)}`;
+const sigOf = (cfg: StoreConfig, link?: DbLink | null) =>
+  `${cfg.kind}:${cfg.token ? 't' : '-'}:${hash(`${cfg.url ?? ''}|${cfg.token ?? ''}`)}` +
+  (link ? `+link:${linkSignature(link)}` : '');
 
 export const MEMORY_LABEL = 'In-memory (no database)';
 
@@ -107,17 +124,50 @@ export function resetStore(): void {
   g.__wingrateStore = null;
   g.__wingrateActive = null;
   g.__wingrateStoreError = null;
+  g.__wingrateLinkProbe = null;
+}
+
+/**
+ * The linked backup database, when one is configured (Telegram/dashboard
+ * setting, `DB_BACKUP_JSON`, or the BACKUP_ / SECONDARY_ env vars).
+ */
+export async function activeLink(): Promise<DbLink | null> {
+  try {
+    const { choice } = await activeConfig();
+    if (choice.mode === 'memory') return null; // explicit "no database" wins
+    return await loadLink();
+  } catch {
+    return null;
+  }
+}
+
+/** Cache signature of the currently configured link (null when unlinked). */
+export async function currentLinkSignature(): Promise<string | null> {
+  const { cfg } = await activeConfig();
+  const link = await activeLink();
+  return link ? sigOf(cfg, link) : null;
 }
 
 /** The configured store, initialized once per config (schema/indexes created on first use). Throws if unreachable. */
 export function getStore(): Promise<RateStore> {
   return (async () => {
     const { cfg } = await activeConfig();
-    const sig = sigOf(cfg);
+    const link = await activeLink();
+    const sig = sigOf(cfg, link);
     if (g.__wingrateStore && g.__wingrateStore.sig === sig) return g.__wingrateStore.promise;
 
     const promise = (async () => {
-      const store = await createStore(cfg);
+      // With a backup linked, the two databases are joined into one store:
+      // writes are mirrored and the backup takes over while the primary is down.
+      const store = link
+        ? await createLinkedStore({
+            primaryConfig: cfg,
+            backupConfig: configFromSpec(link.spec),
+            options: link.options,
+            sig,
+            create: createStore,
+          })
+        : await createStore(cfg);
       await store.init();
       g.__wingrateStoreError = null;
       g.__wingrateActive = { kind: store.kind, label: store.label, sig };
@@ -168,6 +218,206 @@ export interface StoreStatus {
   configWarning: string | null;
   /** Databases the deployment's env vars provide (names only) */
   detected: StoreConfig[];
+  /** Backup database + failover state (null when only one database is used) */
+  link: LinkStatus | null;
+}
+
+/** One side of a linked pair: reachability, contents and observed health. */
+export interface LinkSideStatus {
+  kind: StoreKind;
+  label: string;
+  /** Masked connection target (never a password or token) */
+  target: string | null;
+  reachable: boolean;
+  ms: number;
+  error: string | null;
+  stats: Record<string, unknown> | null;
+  rows: number | null;
+  latest: number | null;
+  alerts: number | null;
+  /** What the linked store observed while serving requests (null before the first one) */
+  runtime: SideState | null;
+}
+
+export interface LinkStatus {
+  linked: true;
+  /** How the link was configured: "connected via Telegram", "environment variables", … */
+  source: string;
+  options: LinkOptions;
+  /** Which database answers requests right now */
+  serving: LinkSide;
+  /** Why the backup is serving, when it is */
+  reason: string | null;
+  /** true when this process actually joined the two databases (vs. configuring only) */
+  active: boolean;
+  primary: LinkSideStatus;
+  backup: LinkSideStatus;
+  counters: LinkCounters;
+  drift: {
+    inSync: boolean | null;
+    /** rows(primary) − rows(backup): positive = the backup is behind */
+    rowsDiff: number | null;
+    /** latest(primary) − latest(backup) in ms: positive = the backup is behind */
+    latestDiffMs: number | null;
+    note: string;
+  };
+  checkedAt: number;
+}
+
+/** How the link should be described in messages. */
+function linkSourceLabel(link: DbLink): string {
+  switch (link.source) {
+    case 'telegram':
+      return 'linked via Telegram';
+    case 'dashboard':
+      return 'linked from the API';
+    case 'env':
+      return 'from BACKUP_ / DB_BACKUP_JSON env vars';
+    default:
+      return 'restored from the saved config file';
+  }
+}
+
+const linkDrift = (primary: LinkSideStatus, backup: LinkSideStatus, counters: LinkCounters): LinkStatus['drift'] => {
+  const rowsDiff = primary.rows !== null && backup.rows !== null ? primary.rows - backup.rows : null;
+  const latestDiffMs = primary.latest !== null && backup.latest !== null ? primary.latest - backup.latest : null;
+
+  let inSync: boolean | null = null;
+  let note: string;
+  if (!primary.reachable || !backup.reachable) {
+    inSync = null;
+    note = !primary.reachable
+      ? backup.reachable
+        ? counters.pendingResync
+          ? 'The primary database is unreachable — the backup is serving and holding rows that still have to be copied back.'
+          : 'The primary database is unreachable — the backup is answering requests.'
+        : 'Neither database answers.'
+      : 'The backup database is unreachable — the primary keeps working, but the copy is stale until it is back.';
+  } else if (counters.pendingResync || (rowsDiff !== null && rowsDiff < 0)) {
+    inSync = false;
+    note = `${Math.abs(rowsDiff ?? 0)} row(s) recorded during a failover are still only in the backup — a re-sync is pending.`;
+  } else if (rowsDiff === 0 && (latestDiffMs === null || Math.abs(latestDiffMs) < 90_000)) {
+    inSync = true;
+    note = 'Both databases hold the same data.';
+  } else {
+    inSync = false;
+    const bits: string[] = [];
+    if (rowsDiff && rowsDiff > 0) bits.push(`the backup is ${rowsDiff} row(s) behind`);
+    if (latestDiffMs && latestDiffMs > 90_000) bits.push(`its newest row is ${Math.round(latestDiffMs / 60_000)} min older`);
+    note = bits.length ? `Out of sync: ${bits.join(', ')} — a sync will copy the missing rows.` : 'The two databases are not identical yet.';
+  }
+  return { inSync, rowsDiff, latestDiffMs, note };
+};
+
+// Probing both sides on every status call would hammer the databases — a short
+// cache keeps /api/database and the Telegram menu cheap to poll.
+const LINK_PROBE_TTL_MS = Number(process.env.LINK_STATUS_TTL_MS) || 5_000;
+
+/**
+ * Health of the linked backup pair: configuration, which side is serving,
+ * what each database holds and how far apart they are. Null when unlinked.
+ */
+export async function linkStatus(opts: { fresh?: boolean } = {}): Promise<LinkStatus | null> {
+  const { cfg, choice } = await activeConfig();
+  if (choice.mode === 'memory') return null;
+  const link = await activeLink();
+  if (!link) return null;
+
+  const sig = sigOf(cfg, link);
+  const cached = g.__wingrateLinkProbe;
+  if (!opts.fresh && cached && cached.sig === sig && Date.now() - cached.at < LINK_PROBE_TTL_MS) return cached.promise;
+
+  const promise = (async (): Promise<LinkStatus> => {
+    const primaryCfg = cfg;
+    const backupCfg = configFromSpec(link.spec);
+    const [primary, backup] = await Promise.all([
+      (async () => {
+        try {
+          return await describeStore(await createStore(primaryCfg));
+        } catch (e) {
+          return { ...(await fallbackSummary(primaryCfg)), reachable: false, error: errDetail(e) };
+        }
+      })(),
+      (async () => {
+        try {
+          return await describeStore(await createStore(backupCfg));
+        } catch (e) {
+          return { ...(await fallbackSummary(backupCfg)), reachable: false, error: errDetail(e) };
+        }
+      })(),
+    ]);
+
+    const state: LinkState | null = linkStateOf(sig);
+    const side = (summary: typeof primary, runtime: SideState | null, target: string | null): LinkSideStatus => ({
+      kind: summary.kind,
+      label: summary.label,
+      target,
+      reachable: summary.reachable,
+      ms: summary.ms,
+      error: summary.error,
+      stats: summary.stats,
+      rows: summary.rows,
+      latest: summary.latest,
+      alerts: summary.alerts,
+      runtime,
+    });
+
+    const counters: LinkCounters =
+      state?.counters ??
+      ({
+        failovers: 0,
+        failbacks: 0,
+        lastFailoverAt: null,
+        lastFailbackAt: null,
+        mirrorWrites: 0,
+        mirrorErrors: 0,
+        mirrorSkips: 0,
+        lastMirrorAt: null,
+        lastMirrorError: null,
+        failoverWrites: 0,
+        resyncs: 0,
+        lastResyncAt: null,
+        lastResyncError: null,
+        lastResyncResult: null,
+        pendingResync: false,
+      } satisfies LinkCounters);
+
+    const primarySide = side(primary, state?.primary ?? null, maskTarget(primaryCfg.url ?? primaryCfg.token ?? '') || 'in-memory');
+    const backupSide = side(backup, state?.backup ?? null, maskTarget(link.spec.url));
+
+    return {
+      linked: true,
+      source: linkSourceLabel(link),
+      options: link.options,
+      serving: state?.serving ?? (primary.reachable ? 'primary' : 'backup'),
+      reason: state?.reason ?? null,
+      active: Boolean(state),
+      primary: primarySide,
+      backup: backupSide,
+      counters,
+      drift: linkDrift(primarySide, backupSide, counters),
+      checkedAt: Date.now(),
+    };
+  })();
+
+  g.__wingrateLinkProbe = { sig, at: Date.now(), promise };
+  promise.catch(() => {}); // status is best-effort; never an unhandled rejection
+  return promise;
+}
+
+/** Minimal summary used when a store cannot even be constructed (bad URL, missing driver). */
+async function fallbackSummary(cfg: StoreConfig) {
+  return {
+    kind: cfg.kind,
+    label: cfg.label,
+    reachable: false,
+    ms: 0,
+    error: null as string | null,
+    stats: null as Record<string, unknown> | null,
+    rows: null as number | null,
+    latest: null as number | null,
+    alerts: null as number | null,
+  };
 }
 
 export async function storeStatus(): Promise<StoreStatus> {
@@ -193,6 +443,7 @@ export async function storeStatus(): Promise<StoreStatus> {
         return [];
       }
     })(),
+    link: null,
   };
 
   const started = Date.now();
@@ -208,6 +459,10 @@ export async function storeStatus(): Promise<StoreStatus> {
     base.ms = Date.now() - started;
     base.error = errDetail(e) || lastStoreError();
   }
+
+  // Backup database / failover state — independent of the store probe above, so
+  // it is still reported when both databases are down.
+  base.link = await linkStatus().catch(() => null);
   return base;
 }
 

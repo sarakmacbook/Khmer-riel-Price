@@ -168,4 +168,14 @@ export class RedisStore implements RateStore {
     const [rows, days] = await Promise.all([this.r.cmd('ZCARD', this.k('rates')), this.r.cmd('HLEN', this.k('daily'))]);
     return { rows, days, prefix: this.k('') };
   }
+  /** Delete stored history and/or alerts (used by "replace" copies). */
+  async wipe(opts: { history?: boolean; alerts?: boolean }) {
+    if (opts.history !== false) {
+      await this.r.cmd('DEL', this.k('rates'), this.k('daily'), this.k('latest'), this.k('refresh'));
+    }
+    if (opts.alerts !== false) {
+      await this.r.cmd('DEL', this.k('alerts'), this.k('alerts:seq'));
+    }
+  }
+
 }
