@@ -64,6 +64,13 @@ export class MemoryStore implements RateStore {
     return dailyFromPoints(await this.range(since ?? 0));
   }
 
+  async backfill(points: Point[]) {
+    const sorted = [...points].sort((a, b) => a.t - b.t);
+    for (const p of sorted) this.rows.push({ bid: p.bid, ask: p.ask, t: p.t, c: p.t });
+    if (this.rows.length > 5000) this.rows.splice(0, this.rows.length - 5000);
+    return sorted.length;
+  }
+
   async listAlerts() {
     return this.alerts.map((a) => ({ ...a }));
   }

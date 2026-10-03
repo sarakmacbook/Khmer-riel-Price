@@ -3,7 +3,14 @@ import { getFreshQuote, fetchWingBankQuote } from '@/lib/scraper';
 import { getStoreOrMemory } from '@/lib/store';
 import { errMsg } from '@/lib/store/types';
 import { effectiveBotToken, getWebAlert, setChatSubscription } from '@/lib/alerts';
-import { sendTelegramMessage } from '@/lib/telegram';
+import { answerCallbackQuery, sendTelegramMessage } from '@/lib/telegram';
+import {
+  DATABASE_HELP,
+  handleDatabaseCallback,
+  handleDatabaseCommand,
+  handleDatabaseValueMessage,
+  looksLikeDatabaseValue,
+} from '@/lib/bot-database';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 30;
@@ -13,15 +20,28 @@ const HELP =
   `• /rate — current live exchange rate\n` +
   `• /alert — subscribe this chat to automatic rate change notifications\n` +
   `• /stop — unsubscribe from alerts\n` +
+  `• /database — 🗄 connect, switch, test or disconnect the app's database\n` +
   `• /help — show this message`;
 
+type Chat = { id?: number | string };
+type TgMessage = { message_id?: number; chat?: Chat; text?: string };
+type TgUpdate = {
+  message?: TgMessage;
+  channel_post?: TgMessage;
+  callback_query?: { id: string; data?: string; message?: TgMessage; from?: { id?: number } };
+};
+
+/** The effective bot token: the one saved on the dashboard, else TELEGRAM_BOT_TOKEN. */
+async function botToken(): Promise<string> {
+  const stored = await getStoreOrMemory()
+    .then((s) => getWebAlert(s))
+    .catch(() => null);
+  return effectiveBotToken(stored ?? { botToken: null }) ?? '';
+}
+
 /** Replies go out with the token saved on the dashboard, else TELEGRAM_BOT_TOKEN. */
-async function reply(chatId: string, text: string): Promise<void> {
-  const token =
-    (await getStoreOrMemory()
-      .then((s) => getWebAlert(s))
-      .catch(() => null)) ?? null;
-  const res = await sendTelegramMessage(effectiveBotToken(token ?? { botToken: null }) ?? '', chatId, text);
+async function reply(chatId: string, text: string, token?: string): Promise<void> {
+  const res = await sendTelegramMessage(token ?? (await botToken()), chatId, text);
   if (!res.success) console.error('[bot] reply failed:', res.error);
 }
 
@@ -45,9 +65,10 @@ async function currentQuote() {
  * Telegram webhook endpoint (registered with BotFather's setWebhook, or by
  * install.sh step 5/7).
  *
- * Always answers 200: Telegram retries non-2xx deliveries and disables the
- * webhook after enough failures, so an internal error must never be returned
- * as a 5xx to Telegram itself.
+ * Handles the rate commands, alert subscriptions AND the 🗄 database menu
+ * (inline buttons + /database, /connect). Always answers 200: Telegram retries
+ * non-2xx deliveries and disables the webhook after enough failures, so an
+ * internal error must never be returned as a 5xx to Telegram itself.
  */
 export async function POST(req: NextRequest) {
   try {
@@ -59,9 +80,23 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, ignored: 'bad secret' }, { status: 403 });
     }
 
-    const body = (await req.json().catch(() => null)) as
-      | { message?: { chat?: { id?: number | string }; text?: string } ; channel_post?: { chat?: { id?: number | string }; text?: string } }
-      | null;
+    const body = (await req.json().catch(() => null)) as TgUpdate | null;
+
+    // ---- Inline button taps (🗄 database menu) ----
+    const cq = body?.callback_query;
+    if (cq) {
+      const chatId = cq.message?.chat?.id !== undefined ? String(cq.message!.chat!.id) : null;
+      const data = (cq.data ?? '').trim();
+      const token = await botToken();
+      if (chatId && cq.message?.message_id && data.startsWith('db:')) {
+        await handleDatabaseCallback({ token, chatId }, cq.message.message_id, data, cq.id);
+      } else {
+        // Acknowledge anyway, otherwise the client keeps spinning on the button.
+        await answerCallbackQuery(token, cq.id);
+      }
+      return NextResponse.json({ ok: true });
+    }
+
     const update = body?.message ?? body?.channel_post;
     const chatIdRaw = update?.chat?.id;
     const text = (update?.text ?? '').trim();
@@ -70,10 +105,19 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true });
     }
     const chatId = String(chatIdRaw);
+    const ctx = { token: await botToken(), chatId };
     const command = text.split(/\s+/)[0].toLowerCase().split('@')[0]; // "/rate@WingRateBot" → "/rate"
 
+    // ---- 🗄 Database menu (owner only) ----
+    // /database, /db, /storage, /connect …
+    if (await handleDatabaseCommand(ctx, text, update?.message_id)) return NextResponse.json({ ok: true });
+    // A connection string pasted right after picking a type in the menu.
+    if (looksLikeDatabaseValue(text) && update?.message_id) {
+      if (await handleDatabaseValueMessage(ctx, text, update.message_id)) return NextResponse.json({ ok: true });
+    }
+
     if (command === '/start' || command === '/help') {
-      await reply(chatId, `${HELP}\n\nYour Chat ID is: <code>${chatId}</code>`);
+      await reply(chatId, `${HELP}\n\n${DATABASE_HELP}\n\nYour Chat ID is: <code>${chatId}</code>`, ctx.token);
     } else if (command === '/rate') {
       try {
         const { quote } = await currentQuote();
@@ -82,9 +126,10 @@ export async function POST(req: NextRequest) {
           `🇰🇭 <b>Wing Bank Exchange Rate</b>\n\n` +
             `• <b>Bank Buys (Bid):</b> ${quote.bid.toLocaleString()} KHR\n` +
             `• <b>Bank Sells (Ask):</b> ${quote.ask.toLocaleString()} KHR`,
+          ctx.token,
         );
       } catch {
-        await reply(chatId, 'Sorry, I could not fetch the rate right now.');
+        await reply(chatId, 'Sorry, I could not fetch the rate right now.', ctx.token);
       }
     } else if (command === '/alert') {
       const store = await getStoreOrMemory();
@@ -93,13 +138,14 @@ export async function POST(req: NextRequest) {
         chatId,
         `🔔 <b>Alerts Activated!</b> You will be notified whenever the Wing Bank rate changes.` +
           (store.persistent ? '' : `\n\n<i>Note: storage is "${store.label}", so this subscription is lost if the server restarts.</i>`),
+        ctx.token,
       );
     } else if (command === '/stop') {
       const store = await getStoreOrMemory();
       await setChatSubscription(store, chatId, false);
-      await reply(chatId, `🔕 <b>Alerts Disabled.</b> Use /alert to re-enable anytime.`);
+      await reply(chatId, `🔕 <b>Alerts Disabled.</b> Use /alert to re-enable anytime.`, ctx.token);
     } else {
-      await reply(chatId, `Unknown command. ${HELP}`);
+      await reply(chatId, `Unknown command. ${HELP}`, ctx.token);
     }
 
     return NextResponse.json({ ok: true });

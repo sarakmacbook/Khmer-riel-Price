@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { ensureDailyHistory } from '@/lib/seed-history';
 import { loadTicks, seedHistoryIfEmpty, storeBackend, type Tick } from '@/lib/history-store';
-import { ensurePostgresSchema } from '@/lib/ensure-schema';
 
 export const dynamic = 'force-dynamic';
 
@@ -19,16 +17,11 @@ const RANGE_MS: Record<string, number> = {
  */
 export async function GET(req: NextRequest) {
   try {
-    // Create tables on a fresh Vercel database BEFORE seeding/reading, so the
-    // very first request already returns data (no manual drizzle-kit push).
-    const backend = storeBackend();
-    if (backend === 'postgres') {
-      await ensurePostgresSchema();
-      await ensureDailyHistory();
-    } else {
-      // Turso / Upstash / memory: auto-create storage + seed daily snapshots
-      await seedHistoryIfEmpty();
-    }
+    // Tables/keys are created on first use by the active store, then a brand-new
+    // (empty) database is seeded with daily snapshots so this first request
+    // already returns a useful chart. Works for every backend, including a
+    // database connected from the Telegram 🗄 menu.
+    await seedHistoryIfEmpty();
 
     const range = req.nextUrl.searchParams.get('range') ?? 'day';
     const isAll = range === 'all';

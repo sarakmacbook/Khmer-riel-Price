@@ -127,6 +127,26 @@ export class MongoStore implements RateStore {
     return d ? toPoint(d) : null;
   }
 
+  /** Bulk-insert historical points (used when seeding a freshly connected database). */
+  async backfill(points: Point[]) {
+    const sorted = [...points].sort((a, b) => a.t - b.t);
+    if (sorted.length === 0) return 0;
+    const base = (await this.latestDoc())?.seq ?? 0;
+    const docs: RateDoc[] = sorted.map((p, i) => ({
+      seq: base + i + 1,
+      bid: p.bid,
+      ask: p.ask,
+      t: new Date(p.t),
+      c: new Date(p.t),
+    }));
+    try {
+      await this.rates.insertMany(docs, { ordered: false });
+    } catch (e) {
+      if (!isDup(e)) throw e; // duplicate seq = a concurrent writer won that slot
+    }
+    return docs.length;
+  }
+
   async daily(since: number | null) {
     const docs = await this.rates
       .aggregate<{ bid: number; ask: number; t: Date }>([

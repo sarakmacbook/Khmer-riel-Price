@@ -34,6 +34,10 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next ./.next
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./package.json
 
+# Writable folder for the runtime database choice saved by the Telegram 🗄 menu
+# (docker-compose mounts a volume here, so the choice survives rebuilds).
+RUN mkdir -p /app/.data && chown -R nextjs:nodejs /app/.data
+
 USER nextjs
 
 EXPOSE 3000

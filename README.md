@@ -13,7 +13,8 @@ Real-time **USD/KHR exchange rate tracker** scraped from **[Wing Bank](https://w
 - 📲 **PWA** — add to home screen on **Android & iPhone** (manifest + service worker + icon)
 - 🔔 **Browser notifications** — fire the moment the bank rate moves
 - 🤖 **Telegram** — bot commands + webhook alerts (`only on price move` / `rate above` / `rate below`), with a **custom alert message** template, configured from the UI next to the bell icon
-- ⏱ **All-time tick history** in PostgreSQL, written by a background cron every 5 minutes
+- 🗄 **Connect a database from Telegram** — `/database` menu to connect, switch, test or disconnect Postgres · Turso · MongoDB · Upstash · Redis · Vercel Blob at runtime, no redeploy or env edits
+- ⏱ **All-time tick history** in any supported database, written by a background cron every 5 minutes
 - ▲ **Vercel-deployable** and **Docker-compose** self-hostable
 
 ---
@@ -127,7 +128,8 @@ bash scripts/update-rates.sh    # curls /api/cron/update-rate every 5 min
 | GET | `/api/health` | Health check |
 | GET/POST | `/api/telegram/settings` | Read / save Telegram alert configuration |
 | POST | `/api/telegram/test` | Send a test alert to Telegram |
-| POST | `/api/bot/webhook` | Telegram bot updates — `/start` `/rate` `/alert` `/stop` |
+| GET/POST/DELETE | `/api/database` | Read the active database · connect/switch one · disconnect (writes need `ADMIN_SECRET`/`CRON_SECRET`) |
+| POST | `/api/bot/webhook` | Telegram bot updates — `/start` `/rate` `/alert` `/stop` `/database` `/connect` |
 | GET/POST | `/api/cron/update-rate` | Scrape rate → store tick → fire Telegram alerts |
 
 ---
@@ -143,6 +145,10 @@ bash scripts/update-rates.sh    # curls /api/cron/update-rate every 5 min
 | `TELEGRAM_WEBHOOK_SECRET` | Optional — when set, `/api/bot/webhook` only accepts updates carrying this `X-Telegram-Bot-Api-Secret-Token` (register it with `setWebhook&secret_token=…`) |
 | `TELEGRAM_API_URL` | Optional — Bot API base, defaults to `https://api.telegram.org` (useful behind a proxy) |
 | `TELEGRAM_TIMEOUT_MS` | Optional — per-request Telegram timeout, default `10000` |
+| `TELEGRAM_ADMIN_CHAT_ID` | Optional — only this chat may use the Telegram 🗄 `/database` menu. Set it to lock the bot down (without it the first chat that runs `/database` becomes the owner) |
+| `DB_CONFIG_FILE` | Optional — file where the database picked in Telegram is remembered, default `<cwd>/.data/wingrate-db.json` |
+| `DB_CONFIG_JSON` | Optional — the same document inline (`{"mode":"custom","spec":{"kind":"postgres","url":"…","token":"…"}}`) for read-only filesystems / serverless. A saved config file wins over it |
+| `ADMIN_SECRET` | Optional — secret required by `POST`/`DELETE /api/database` (`x-admin-secret` header or `Bearer`). Without it (or `CRON_SECRET`), changing the database over HTTP is disabled and only Telegram can do it |
 
 > **Telegram alerts work with any storage backend.** Alert settings and bot
 > subscriptions are read/written through the same storage layer as the price
@@ -211,8 +217,76 @@ group of env vars and price history just works (priority order):
 Verify which one is active: `GET /api/health` → `{"ok":true,"store":"upstash",…}`,
 or the `x-store` header on `GET /api/rate/history`.
 
-> 📌 **Telegram subscriber storage** needs Postgres (option 3); on Turso/Upstash
-> the site, chart, cron and `/api/telegram/test` still work.
+> 📌 **Anything can change at runtime.** The site, chart, cron, alerts and bot
+> subscriptions all read the *active* store — the one the env vars select, or the
+> one connected from Telegram. See the next section.
+
+## 🗄 Connect any database from Telegram — no redeploy
+
+Send **`/database`** to your bot: you get a menu to connect, switch between,
+test and disconnect databases while the app is running. Everything (dashboard,
+chart, history, cron, price alerts, bot subscriptions) follows the switch
+immediately — the old builds were stuck with whichever database the
+environment variables pointed at.
+
+| Action | How |
+| ------ | --- |
+| Open the menu | `/database`, `/db` or `/storage` |
+| Connect | **🔌 Connect database** → tap a type → **paste the connection string** (or `/connect <type> <url> [token]`) |
+| Switch | **🔌 Connect database** again and paste another one — the previous database stays untouched |
+| Test | **🧪 Test connection** (re-connects and reports latency + row count) |
+| Disconnect | **⏏️ Disconnect** → *use no database (in-memory)* or *use the environment database* |
+
+```bash
+# Examples of /connect (the type is optional when the URL is unambiguous)
+/connect postgres postgresql://user:pass@host:5432/dbname
+/connect https://my-db-org.turso.io eyJhbGciOi...          # Turso/libSQL + token
+/connect mongodb+srv://user:pass@cluster.mongodb.net/wingrate
+/connect upstash https://xxx.upstash.io AX...token
+/connect rediss://default:pass@host:6379
+/connect blob vercel_blob_rw_xxxxxxxx_yyyyyyyy
+```
+
+**How it behaves**
+
+- 🔎 **Safe by design** — the new database is probed (connect → create
+  tables/keys → read) *before* anything switches. A typo leaves the working
+  database untouched.
+- 💾 **Remembers the choice** — saved to `DB_CONFIG_FILE`
+  (`<cwd>/.data/wingrate-db.json` in Docker, via the `app_data` volume). When
+  the working directory is read-only it falls back to a namespaced file in
+  `$TMPDIR` and tells you so; `DB_CONFIG_JSON` pins a choice permanently for
+  serverless deploys. **Resolution order:** config file → `DB_CONFIG_JSON` → env auto-detection.
+- 🔒 **Owner only** — set `TELEGRAM_ADMIN_CHAT_ID` to the allowed chat id, or
+  leave it unset and the first chat that runs `/database` claims ownership
+  (the claim is stored with the config). Other chats get a "only the bot owner"
+  reply.
+- 🧹 **No credentials left behind** — passwords/tokens are masked in every reply
+  and the message you pasted them in is deleted when Telegram permits it.
+- 🐳 **Docker** — the choice lives in the `app_data` volume, so
+  `docker-compose up -d --build` keeps it. **Vercel** — write a choice once and
+  it applies to the instance handling the webhook; set `DB_CONFIG_JSON` (or
+  reuse the same database through env vars) if you want every cold instance on it.
+- 🧰 **Same thing over HTTP** (for the dashboard or scripts):
+
+```bash
+# read (no secret needed, secrets are masked)
+curl https://your-app.vercel.app/api/database
+
+# connect / switch (needs ADMIN_SECRET or CRON_SECRET)
+curl -X POST https://your-app.vercel.app/api/database \
+  -H "x-admin-secret: $ADMIN_SECRET" -H 'content-type: application/json' \
+  -d '{"kind":"postgres","url":"postgresql://user:pass@host:5432/db"}'
+
+# disconnect (mode=memory default, mode=auto = back to the env database)
+curl -X DELETE "https://your-app.vercel.app/api/database?mode=auto" -H "x-admin-secret: $ADMIN_SECRET"
+```
+
+`GET /api/health` and `GET /api/status` report the active store, how it was
+chosen (`environment variables` / `connected via Telegram` / `restored from the
+saved config file`) and where the choice is saved.
+
+---
 
 ## 🗂 Project structure
 
@@ -229,7 +303,11 @@ src/
   db/                       ← Drizzle schema & client
   lib/
     scraper.ts              ← Wing Bank scraper (cheerio)
-    telegram.ts             ← Telegram send helpers
+    telegram.ts             ← Telegram send helpers (messages, buttons, callbacks)
+    bot-database.ts         ← 🗄 Telegram database menu (connect/switch/test/disconnect)
+    db-config.ts            ← runtime database choice: file / DB_CONFIG_JSON / ownership
+    db-actions.ts           ← connect · disconnect · test (shared by bot & API)
+    store/                  ← storage layer: postgres · turso · mongodb · redis · blob · memory
 ```
 
 ---

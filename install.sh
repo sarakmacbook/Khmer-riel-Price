@@ -89,6 +89,10 @@ fi
 echo -e "${GREEN}[2/7] Configuration...${NC}"
 read -p "Enter your Telegram Bot Token: " BOT_TOKEN
 read -p "Enter your Domain (e.g., rate.yourdomain.com): " DOMAIN
+read -p "Telegram chat id allowed to manage the database (optional, Enter to skip): " ADMIN_CHAT_ID
+
+# Optional secret for POST/DELETE /api/database (generated when openssl exists).
+ADMIN_SECRET=$(openssl rand -hex 24 2>/dev/null || true)
 
 if [ -z "$BOT_TOKEN" ] || [ -z "$DOMAIN" ]; then
     echo -e "${RED}Error: Bot Token and Domain are required!${NC}"
@@ -104,6 +108,12 @@ DATABASE_URL=postgresql://postgres:postgres@db:5432/app_db
 POSTGRES_URL=postgresql://postgres:postgres@db:5432/app_db
 TELEGRAM_BOT_TOKEN=$BOT_TOKEN
 NEXT_PUBLIC_SITE_URL=https://$DOMAIN
+# 🗄 Database menu (Telegram): who may use it, and where the choice is stored.
+# Leave TELEGRAM_ADMIN_CHAT_ID empty and the first chat that runs /database owns it.
+TELEGRAM_ADMIN_CHAT_ID=$ADMIN_CHAT_ID
+DB_CONFIG_FILE=/app/.data/wingrate-db.json
+# Secret for POST/DELETE /api/database (empty = HTTP changes disabled).
+ADMIN_SECRET=$ADMIN_SECRET
 EOF
 
 # ------------------------------------------------------------

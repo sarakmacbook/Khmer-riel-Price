@@ -16,6 +16,188 @@ export interface StoreConfig {
   token?: string;
 }
 
+/**
+ * A database the user typed in (Telegram /admin or POST /api/database).
+ * Stored as the runtime override next to the env-detected configuration.
+ */
+export interface DbSpec {
+  kind: StoreKind;
+  url: string;
+  token?: string | null;
+  /** Optional custom name shown instead of the auto-detected one */
+  label?: string | null;
+}
+
+export interface DbKindMeta {
+  kind: StoreKind;
+  name: string;
+  emoji: string;
+  /** one line explaining what this backend is */
+  hint: string;
+  /** copy-paste example of what to send */
+  example: string;
+  /** second value the user must send (token / auth secret) */
+  tokenLabel?: string;
+  /** a pasted value matching this pattern identifies the backend */
+  urlPattern?: RegExp;
+  /** accepted URL schemes */
+  schemes?: RegExp;
+  /** env vars this backend normally comes from (diagnostics only, never values) */
+  envHints: string[];
+}
+
+/** Everything the Telegram connect menu knows about each backend. Order = detection order. */
+export const KIND_META: DbKindMeta[] = [
+  {
+    kind: 'postgres',
+    name: 'PostgreSQL',
+    emoji: '🐘',
+    hint: 'Neon · Supabase · Vercel Postgres · any Postgres server',
+    example: 'postgresql://user:password@host:5432/dbname',
+    urlPattern: /^postgres(ql)?:\/\//i,
+    schemes: /^postgres(ql)?:\/\//i,
+    envHints: ['DATABASE_URL', 'POSTGRES_URL', 'POSTGRES_PRISMA_URL', 'SUPABASE_DB_URL'],
+  },
+  {
+    kind: 'turso',
+    name: 'Turso / libSQL',
+    emoji: '🗂',
+    hint: 'Turso free tier — tables are created automatically',
+    example: 'libsql://my-db-org.turso.io',
+    tokenLabel: 'Turso auth token',
+    urlPattern: /^(libsql|wss?):\/\/|^(https?):\/\/.*\.turso\.io/i,
+    schemes: /^(libsql|wss?|https?):\/\//i,
+    envHints: ['TURSO_DATABASE_URL', 'LIBSQL_URL', 'TURSO_AUTH_TOKEN'],
+  },
+  {
+    kind: 'mongodb',
+    name: 'MongoDB',
+    emoji: '🍃',
+    hint: 'MongoDB Atlas M0 or any MongoDB 5+',
+    example: 'mongodb+srv://user:password@cluster.mongodb.net/wingrate',
+    urlPattern: /^mongodb(\+srv)?:\/\//i,
+    schemes: /^mongodb(\+srv)?:\/\//i,
+    envHints: ['MONGODB_URI', 'MONGO_URL'],
+  },
+  {
+    kind: 'upstash',
+    name: 'Upstash Redis (REST)',
+    emoji: '⚡',
+    hint: 'Upstash / Vercel KV REST endpoint + token',
+    example: 'https://xxx.upstash.io',
+    tokenLabel: 'Upstash REST token',
+    urlPattern: /^https?:\/\/[^/]*\.upstash\.io(\/.*)?$/i,
+    schemes: /^https?:\/\//i,
+    envHints: ['UPSTASH_REDIS_REST_URL', 'KV_REST_API_URL', 'UPSTASH_REDIS_REST_TOKEN'],
+  },
+  {
+    kind: 'redis',
+    name: 'Redis (TCP)',
+    emoji: '🧱',
+    hint: 'Redis Cloud, Upstash TCP or self-hosted redis:// / rediss://',
+    example: 'rediss://default:password@host:6379',
+    urlPattern: /^rediss?:\/\//i,
+    schemes: /^rediss?:\/\//i,
+    envHints: ['REDIS_URL', 'KV_URL', 'REDIS_TLS_URL'],
+  },
+  {
+    kind: 'blob',
+    name: 'Vercel Blob',
+    emoji: '📦',
+    hint: 'One private JSON document — no tables, uses a read/write token',
+    example: 'vercel_blob_rw_xxxxxxxx_yyyyyyyy',
+    urlPattern: /^vercel_blob_rw_/i,
+    envHints: ['BLOB_READ_WRITE_TOKEN'],
+  },
+];
+
+export const kindMeta = (kind: StoreKind): DbKindMeta => KIND_META.find((m) => m.kind === kind) ?? KIND_META[0];
+
+/** Infer the backend from a pasted connection string / token. */
+export function detectKindFromUrl(value: string): StoreKind | null {
+  const v = value.trim();
+  return KIND_META.find((m) => m.urlPattern?.test(v))?.kind ?? null;
+}
+
+/** Validate one user-supplied value for a backend. Throws a friendly Error. */
+export function validateSpec(spec: DbSpec): DbSpec {
+  const meta = KIND_META.find((m) => m.kind === spec.kind);
+  if (!meta) throw new Error(`Unknown database type "${spec.kind}".`);
+  const url = (spec.url ?? '').trim();
+  if (!url) throw new Error(`Missing connection string for ${meta.name}.`);
+  if (meta.schemes && !meta.schemes.test(url)) {
+    throw new Error(`${meta.name} expects a value like: ${meta.example}`);
+  }
+  if (meta.tokenLabel) {
+    const token = (spec.token ?? '').trim();
+    if (/^https?:\/\//i.test(token)) throw new Error(`That looks like a URL, not the ${meta.tokenLabel}.`);
+    if (spec.kind !== 'turso' && !token) throw new Error(`${meta.name} also needs the ${meta.tokenLabel}.`);
+  }
+  return { ...spec, url, token: (spec.token ?? '').trim() || null };
+}
+
+export function labelForSpec(spec: DbSpec): string {
+  if (spec.label?.trim()) return spec.label.trim();
+  switch (spec.kind) {
+    case 'postgres':
+      return postgresLabel(spec.url);
+    case 'turso':
+      return 'Turso (libSQL)';
+    case 'mongodb':
+      return /mongodb\.net$/i.test(hostOf(spec.url)) ? 'MongoDB Atlas' : 'MongoDB';
+    case 'upstash':
+      return 'Upstash Redis (REST)';
+    case 'redis':
+      return 'Redis';
+    case 'blob':
+      return 'Vercel Blob';
+    default:
+      return kindMeta(spec.kind).name;
+  }
+}
+
+/** Turn a user-supplied database into the StoreConfig the factory understands. */
+export function configFromSpec(spec: DbSpec, envVars: string[] = []): StoreConfig {
+  const s = validateSpec(spec);
+  // Blob has no URL: the value the user pastes IS the read/write token.
+  if (s.kind === 'blob') return { kind: s.kind, label: labelForSpec(s), token: s.url, envVars };
+  return { kind: s.kind, label: labelForSpec(s), url: s.url, token: s.token ?? undefined, envVars };
+}
+
+// ---------------------------------------------------------------------------
+// Redaction helpers — connection strings are never echoed with secrets intact.
+// ---------------------------------------------------------------------------
+
+/** "postgresql://user:•••@host:5432/db" */
+export function maskUrl(url: string): string {
+  const raw = (url ?? '').trim();
+  if (!raw) return '';
+  try {
+    const u = new URL(raw);
+    if (u.password) u.password = '•••';
+    for (const key of [...u.searchParams.keys()]) {
+      if (/token|password|secret|key/i.test(key)) u.searchParams.set(key, '•••');
+    }
+    return u.toString();
+  } catch {
+    return raw.replace(/:\/\/([^:@/]+):[^@/]+@/, '://$1:•••@');
+  }
+}
+
+export function maskToken(token: string | null | undefined): string {
+  const t = (token ?? '').trim();
+  if (!t) return '—';
+  if (t.length <= 8) return '•••';
+  return `${t.slice(0, 4)}…${t.slice(-4)}`;
+}
+
+export const redactError = (e: unknown): string => {
+  const msg = e instanceof Error ? e.message : String(e);
+  // Some drivers echo the full URL (with password) in error messages.
+  return msg.replace(/([a-z][a-z0-9+.-]*:\/\/[^\s@/]+):[^\s@/]+@/gi, '$1:•••@');
+};
+
+
 export const DETECTION_ORDER: StoreKind[] = ['postgres', 'turso', 'mongodb', 'upstash', 'redis', 'blob'];
 
 type Entry = [key: string, value: string];

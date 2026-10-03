@@ -1,5 +1,5 @@
 import { after } from 'next/server';
-import { getStoreOrMemory, memoryStore, type RateRow, type RateStore, type StoreKind } from '@/lib/store';
+import { activeSignature, getStoreOrMemory, memoryStore, type RateRow, type RateStore, type StoreKind } from '@/lib/store';
 import { errMsg } from '@/lib/store/types';
 import { fetchWingBankQuote } from '@/lib/scraper';
 import { notifyRateChange } from '@/lib/alerts';
@@ -28,9 +28,11 @@ const toLatest = (r: RateRow, storage: StoreKind): LatestRate => ({
   storage,
 });
 
-// Per-instance cache of the latest row: saves database reads/quota on warm instances.
+// Per-instance cache of the latest row: saves database reads/quota on warm
+// instances. Keyed by the store signature so switching databases (including
+// from the Telegram 🗄 menu) can never serve a row from the previous one.
 const g = globalThis as typeof globalThis & {
-  __wingrateCache?: { kind: StoreKind; row: RateRow; readAt: number };
+  __wingrateCache?: { sig: string; row: RateRow; readAt: number };
   __wingrateLastClaim?: number;
 };
 
@@ -45,7 +47,7 @@ export function refreshRate(): Promise<LatestRate> {
 
 async function recordIn(store: RateStore, q: { bid: number; ask: number }, now: number) {
   const res = await store.record(q, now);
-  g.__wingrateCache = { kind: store.kind, row: res.row, readAt: Date.now() };
+  if (store.kind !== 'memory') g.__wingrateCache = { sig: activeSignature(), row: res.row, readAt: Date.now() };
   // res.changed is true only when the price differs from the stored one;
   // res.prev guards the first tick — alerts fire only on a real price move.
   if (res.prev && res.changed && store.persistent) {
@@ -90,12 +92,12 @@ export async function getLatestRate(): Promise<LatestRate> {
   let row: RateRow | null = null;
 
   const cached = g.__wingrateCache;
-  if (cached && cached.kind === store.kind && now - cached.readAt < store.readTtlMs) {
+  if (cached && cached.sig === activeSignature() && now - cached.readAt < store.readTtlMs) {
     row = cached.row;
   } else {
     try {
       row = await store.latest();
-      if (row) g.__wingrateCache = { kind: store.kind, row, readAt: now };
+      if (row && store.kind !== 'memory') g.__wingrateCache = { sig: activeSignature(), row, readAt: now };
     } catch (e) {
       console.error(`[${store.kind}] read failed, falling back to memory:`, errMsg(e));
       store = memoryStore();
