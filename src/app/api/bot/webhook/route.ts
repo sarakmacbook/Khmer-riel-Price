@@ -21,6 +21,8 @@ const HELP =
   `• /alert — subscribe this chat to automatic rate change notifications\n` +
   `• /stop — unsubscribe from alerts\n` +
   `• /database — 🗄 connect, switch, test or disconnect the app's database\n` +
+  `• /link — 🔗 add a 2nd database as a live backup (mirror + automatic failover)\n` +
+  `• /sync — 🧬 copy history & alerts between the linked databases\n` +
   `• /help — show this message`;
 
 type Chat = { id?: number | string };

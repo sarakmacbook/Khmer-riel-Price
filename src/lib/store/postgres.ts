@@ -206,4 +206,11 @@ export class PostgresStore implements RateStore {
     const r = await this.pool.query('SELECT count(*)::int AS rows, min("timestamp") AS first, max("timestamp") AS last FROM exchange_rates');
     return r.rows[0];
   }
+
+  /** Delete stored history and/or alerts (used by "replace" copies). */
+  async wipe(opts: { history?: boolean; alerts?: boolean }) {
+    if (opts.history !== false) await this.pool.query('TRUNCATE TABLE exchange_rates RESTART IDENTITY');
+    if (opts.alerts !== false) await this.pool.query('TRUNCATE TABLE telegram_alerts RESTART IDENTITY');
+  }
+
 }

@@ -1,5 +1,6 @@
 import { pingStore, storeBackend, storeDiagnostics } from '@/lib/history-store';
 import { storeStatus } from '@/lib/store';
+import { linkJson } from '@/lib/db-http';
 import { redactError } from '@/lib/store/env';
 
 export const dynamic = 'force-dynamic';
@@ -40,6 +41,8 @@ export async function GET() {
     reachable: status.reachable,
     ms: status.ms,
     stats: status.stats,
+    /** Backup database + failover state (null when only one database is used) */
+    link: linkJson(status.link),
     configPath: status.configPath,
     configWarning: status.configWarning,
     timestamp: new Date().toISOString(),

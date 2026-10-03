@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { fetchWingBankQuote } from '@/lib/scraper';
 import { getLatestTick, saveTick, storeBackend } from '@/lib/history-store';
 import { notifyRateChange } from '@/lib/alerts';
+import { runLinkMaintenance } from '@/lib/link-jobs';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
@@ -43,6 +44,15 @@ export async function GET(req: NextRequest) {
       alertError = res.error;
     }
 
+    // Backup database: finish any pending re-sync / repair a lagging mirror.
+    // Cheap when everything is in sync (two lightweight probe reads).
+    const link = await runLinkMaintenance().catch((e: unknown) => ({
+      ran: false,
+      reason: undefined as string | undefined,
+      error: e instanceof Error ? e.message : String(e),
+      actions: [] as Awaited<ReturnType<typeof runLinkMaintenance>>['actions'],
+    }));
+
     return NextResponse.json({
       success: true,
       ...quote,
@@ -53,6 +63,12 @@ export async function GET(req: NextRequest) {
       notified,
       alertError,
       store: storeBackend(),
+      link: {
+        ran: link.ran,
+        reason: link.reason ?? null,
+        error: link.error ?? null,
+        copied: link.actions.reduce((n, a) => n + (a.history?.copied ?? 0) + (a.alerts?.copied ?? 0), 0),
+      },
     });
   } catch (error) {
     return NextResponse.json(

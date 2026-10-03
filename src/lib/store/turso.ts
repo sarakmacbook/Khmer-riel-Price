@@ -227,6 +227,14 @@ export class TursoStore implements RateStore {
     return toAlert(row);
   }
 
+  /** Delete stored history and/or alerts (used by "replace" copies). */
+  async wipe(opts: { history?: boolean; alerts?: boolean }) {
+    const stmts: Stmt[] = [];
+    if (opts.history !== false) stmts.push({ sql: 'DELETE FROM exchange_rates' });
+    if (opts.alerts !== false) stmts.push({ sql: 'DELETE FROM telegram_alerts' });
+    if (stmts.length) await this.pipeline(stmts);
+  }
+
   async stats() {
     const [r] = await this.one('SELECT count(*) AS rows, min(ts) AS first, max(ts) AS last FROM exchange_rates');
     return { rows: r.rows, first: r.first ? new Date(Number(r.first)).toISOString() : null, last: r.last ? new Date(Number(r.last)).toISOString() : null };

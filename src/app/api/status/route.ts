@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { storeStatus } from '@/lib/store';
-import { maskUrl, redactError } from '@/lib/store/env';
+import { linkJson } from '@/lib/db-http';
+import { maskTarget, redactError } from '@/lib/store/env';
 import { fetchWingBankQuote } from '@/lib/scraper';
 import { REFRESH_MS } from '@/lib/rates';
 
@@ -41,8 +42,10 @@ export async function GET(req: NextRequest) {
   };
   if (s.error) storage.error = redactError(s.error);
   if (s.choice.mode === 'custom') {
-    storage.target = maskUrl(s.choice.spec.url); // masked — never the password
+    storage.target = maskTarget(s.choice.spec.url); // masked — never the password/token
   }
+  // Linked backup database: which side is serving, health of both, sync state.
+  if (s.link) storage.link = linkJson(s.link);
   if (storage.activeKind === 'memory') {
     storage.note =
       s.choice.mode === 'memory'

@@ -75,6 +75,12 @@ export class MemoryStore implements RateStore {
     return this.alerts.map((a) => ({ ...a }));
   }
 
+  /** Delete stored history and/or alerts (used by "replace" copies). */
+  async wipe(opts: { history?: boolean; alerts?: boolean } = {}) {
+    if (opts.history !== false) this.rows = [];
+    if (opts.alerts !== false) this.alerts = [];
+  }
+
   async saveAlert(a: AlertInput) {
     const i = a.id ? this.alerts.findIndex((x) => x.id === a.id) : -1;
     const rec = toAlertRecord(a, a.id ?? String(this.alerts.length + 1), i >= 0 ? this.alerts[i].createdAt : Date.now());
