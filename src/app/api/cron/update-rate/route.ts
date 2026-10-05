@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { fetchWingBankQuote } from '@/lib/scraper';
-import { getLatestTick, saveTick, storeBackend } from '@/lib/history-store';
+import { saveTick, storeBackend } from '@/lib/history-store';
 import { notifyRateChange } from '@/lib/alerts';
 import { runLinkMaintenance } from '@/lib/link-jobs';
 
@@ -16,21 +16,20 @@ export async function GET(req: NextRequest) {
   try {
     // The active store creates its own schema/keys on first use (Postgres,
     // Turso, MongoDB, Redis, Blob) — including a database connected at runtime.
-    const previous = await getLatestTick().catch(() => null);
     const quote = await fetchWingBankQuote();
 
-    await saveTick({ rate: quote.bid, bid: quote.bid, ask: quote.ask });
-
+    // `record()` returns the actual previous quote atomically. The live-rate
+    // endpoint also records ticks, so a separate `latest()` read here could
+    // observe the new quote and make the cron incorrectly conclude nothing moved.
+    const recorded = await saveTick({ rate: quote.bid, bid: quote.bid, ask: quote.ask });
+    const previous = recorded?.prev ?? null;
     const prevBid = previous?.bid ?? null;
-    const bidChanged = prevBid !== null && prevBid !== quote.bid;
-    // The price "moved" only when there IS a previous quote AND it differs
-    // (bid or ask). No previous quote (fresh/empty history) = no move = no alert.
-    const priceMoved = previous !== null && (previous.bid !== quote.bid || previous.ask !== quote.ask);
+    const bidChanged = previous !== null && recorded?.changed === true && prevBid !== quote.bid;
+    const priceMoved = previous !== null && recorded?.changed === true;
 
-    // Automatic Telegram delivery — only when the price actually moved.
-    // Goes through the RateStore abstraction, so subscribers are honoured on
-    // Postgres, Turso, MongoDB, Upstash/Redis, Vercel Blob and memory alike
-    // (it used to require Postgres and silently skip on everything else).
+    // Automatic Telegram delivery — only the request that atomically recorded
+    // an actual move sends alerts. The live-rate endpoint uses the same result,
+    // so visitor traffic cannot consume a rate change before the cron sees it.
     let notified = 0;
     let matched = 0;
     let alertError: string | undefined;

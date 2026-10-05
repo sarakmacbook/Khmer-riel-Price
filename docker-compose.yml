@@ -21,6 +21,7 @@ services:
     environment:
       DATABASE_URL: postgresql://postgres:postgres@db:5432/app_db
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      CRON_SECRET: ${CRON_SECRET:-}
       # Optional: only these chats may use the Telegram /database menu.
       # TELEGRAM_ADMIN_CHAT_ID: ${TELEGRAM_ADMIN_CHAT_ID:-}
       # Where the database picked in Telegram is remembered (survives restarts).
@@ -35,13 +36,16 @@ services:
   cron:
     image: curlimages/curl:latest
     restart: always
-    command: 
+    environment:
+      CRON_SECRET: ${CRON_SECRET:-}
+      RATE_UPDATE_INTERVAL_SECONDS: ${RATE_UPDATE_INTERVAL_SECONDS:-10}
+    command:
       - sh
       - -c
       - |
         while true; do
-          curl -s http://app:3000/api/cron/update-rate > /dev/null
-          sleep 300
+          curl -fsS -H "Authorization: Bearer $$CRON_SECRET" http://app:3000/api/cron/update-rate > /dev/null || true
+          sleep "$$RATE_UPDATE_INTERVAL_SECONDS"
         done
     depends_on:
       - app

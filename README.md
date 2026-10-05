@@ -15,7 +15,7 @@ Real-time **USD/KHR exchange rate tracker** scraped from **[Wing Bank](https://w
 - 🤖 **Telegram** — bot commands + webhook alerts (`only on price move` / `rate above` / `rate below`), with a **custom alert message** template, configured from the UI next to the bell icon
 - 🗄 **Connect a database from Telegram** — `/database` menu to connect, switch, test or disconnect Postgres · Turso · MongoDB · Upstash · Redis · Vercel Blob at runtime, no redeploy or env edits
 - 🔗 **Backup database & automatic failover** — link a second database (any supported kind): every write is mirrored into it, it takes over within the same request if the primary goes down, and the app returns to the primary automatically — `/link`, `/sync`, `/promote`, or `POST /api/database`
-- ⏱ **All-time tick history** in any supported database, written by a background cron every 5 minutes
+- ⏱ **All-time tick history** in any supported database, checked every 10 seconds by the VPS/Docker poller (and while the dashboard is open)
 - ▲ **Vercel-deployable** and **Docker-compose** self-hostable
 
 ---
@@ -53,7 +53,7 @@ It will **prompt you for two things**:
 | **3/7** | Generates `.env` (`DATABASE_URL`, `POSTGRES_URL`, `TELEGRAM_BOT_TOKEN`, `NEXT_PUBLIC_SITE_URL`) |
 | **4/7** | Runs `docker-compose up -d --build` — starts **PostgreSQL 15**, the **Next.js app** (port 3000), and the **rate-updater sidecar** |
 | **5/7** | Registers your **Telegram webhook** → `https://<domain>/api/bot/webhook` |
-| **6/7** | Installs the **crontab entry** that hits `/api/cron/update-rate` every 5 minutes |
+| **6/7** | Installs a **once-per-minute fallback cron**; the Docker poller itself checks every 10 seconds |
 | **7/7** | Creates all database tables automatically (`drizzle-kit push` inside the container) |
 
 When it finishes you'll see:
@@ -62,7 +62,7 @@ When it finishes you'll see:
 ✅ Installation Complete!
 🌐 Your site: https://rate.yourdomain.com
 🤖 Bot is now active.
-⏰ Rates will update every 5 minutes via Cron.
+⏰ Rates are checked every 10 seconds; Telegram alerts are sent as soon as a change is detected.
 ```
 
 > ⚠️ **HTTPS is still on you:** point your domain at port **3000** with a
@@ -95,11 +95,12 @@ docker-compose exec app npx drizzle-kit push
 # 4. tell Telegram where to send updates
 curl -X POST "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setWebhook?url=https://your-domain.com/api/bot/webhook"
 
-# 5. rate updates (install.sh already does this)
-(crontab -l 2>/dev/null; echo "*/5 * * * * curl -s https://your-domain.com/api/cron/update-rate > /dev/null 2>&1") | crontab -
+# Docker's included cron service polls every 10 seconds. For a non-Docker
+# deployment, add this once-per-minute fallback to the host crontab:
+(crontab -l 2>/dev/null; echo "* * * * * curl -fsS https://your-domain.com/api/cron/update-rate > /dev/null 2>&1") | crontab -
 ```
 
-Docker Compose services: `db` (postgres:15-alpine) · `app` (port 3000) · `cron` (curl loop every 300s).
+Docker Compose services: `db` (postgres:15-alpine) · `app` (port 3000) · `cron` (curl loop every 10s by default; configurable with `RATE_UPDATE_INTERVAL_SECONDS`).
 
 ---
 
@@ -115,7 +116,7 @@ npm run dev                # http://localhost:3000
 Background rate writer for dev:
 
 ```bash
-bash scripts/update-rates.sh    # curls /api/cron/update-rate every 5 min
+bash scripts/update-rates.sh    # every 10 sec by default (override RATE_UPDATE_INTERVAL_SECONDS)
 ```
 
 ---
@@ -186,7 +187,7 @@ The project is tuned to deploy small and cold-start fast:
 - 🗜 **Optimized PWA icons** — 1 MB → **5 KB** (192px) and 117 KB → **6 KB** (512px), cutting ~1.1 MB from the deploy artifact
 - 🐘 **Serverless-safe Postgres** — one cached pool (`max: 3`) reused across warm invocations, auto-TLS for Neon/Supabase, works with `POSTGRES_URL` **or** `DATABASE_URL`
 - 🧹 **No `@vercel/postgres` / `telegraf` in the bundle** — the DB client uses plain `pg`, Telegram uses `fetch`
-- ⏰ **Hobby-safe cron** — `vercel.json` ships a **daily** schedule (`0 0 * * *`), which is the finest cron Vercel Hobby allows (5-minute crons are a **Pro** feature)
+- ⏰ **Hobby-safe cron** — `vercel.json` ships a **daily** schedule (`0 0 * * *`) so free Hobby deployments remain deployable; use a Pro cron or external scheduler for unattended minute-level checks
 
 ### Steps
 
@@ -200,10 +201,14 @@ The project is tuned to deploy small and cold-start fast:
    curl "https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://your-app.vercel.app/api/bot/webhook"
    ```
 
-> 📌 `vercel.json` ships a **5-minute cron**. The **Vercel Hobby plan rejects
-> schedules more frequent than daily** — if the deploy fails validation,
-> change it to `0 0 * * *` (daily) on Hobby, or use **Pro**. Live ticks are
-> still recorded whenever a visitor has the dashboard open.
+> 📌 Wing Bank does not push rate changes to the app, so alerts are sent as
+> soon as polling detects a change. With the dashboard open, the rate source is
+> checked about every **10 seconds**. The VPS/Docker poller also runs every 10 seconds.
+> Vercel **Hobby** only permits a daily cron (and may run it up to 59 minutes
+> late), so it cannot provide unattended near-real-time alerts. For background
+> minute-level checks on Vercel, use **Pro** and set the cron schedule to
+> `* * * * *`, or use an external scheduler to call `/api/cron/update-rate`
+> once per minute.
 
 ---
 
@@ -328,8 +333,8 @@ A deployment can use **two** databases instead of one:
   alerts keep working during an outage.
 - ↩️ **Automatic return + catch-up** — the primary is re-probed (default every
   30 s); as soon as it answers, traffic goes back and the rows/alerts that were
-  written to the backup are copied back into it (`autoResync`). The 5-minute
-  cron also repairs a backup that missed writes.
+  written to the backup are copied back into it (`autoResync`). The 10-second
+  poller also repairs a backup that missed writes.
 - 🧬 **Sync any two databases** — `POST /api/database` with
   `{"action":"sync","from":{…},"to":{…}}` copies history + alerts between two
   arbitrary databases (e.g. moving an old Postgres into a new Turso before

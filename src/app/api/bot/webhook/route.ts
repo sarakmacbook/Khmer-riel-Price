@@ -47,7 +47,7 @@ async function reply(chatId: string, text: string, token?: string): Promise<void
   if (!res.success) console.error('[bot] reply failed:', res.error);
 }
 
-/** Cheapest available quote: 30s scraper cache → stored row → live scrape. */
+/** Cheapest available quote: 10s scraper cache → stored row → live scrape. */
 async function currentQuote() {
   const cached = getFreshQuote();
   if (cached) return { quote: cached, source: 'live' as const };

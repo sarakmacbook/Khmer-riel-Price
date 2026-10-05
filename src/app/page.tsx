@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import dynamic from 'next/dynamic';
 import { TrendingUp, TrendingDown, RefreshCw, Bell, Calculator, Sparkles, Send } from 'lucide-react';
 import BrandMark from '@/components/BrandMark';
@@ -27,6 +27,12 @@ export default function RateTracker() {
   const [prevRate, setPrevRate] = useState<number | null>(null);
   const [rateStatus, setRateStatus] = useState<'connecting' | 'live' | 'retrying'>('connecting');
   const [loading, setLoading] = useState(true);
+  const [refreshingRate, setRefreshingRate] = useState(false);
+  const [refreshStatus, setRefreshStatus] = useState<'idle' | 'success' | 'error'>('idle');
+  const [refreshMessage, setRefreshMessage] = useState('');
+  const rateRequestRef = useRef<AbortController | null>(null);
+  const manualRefreshRef = useRef(false);
+  const latestRateRef = useRef<number | null>(null);
   const [isNotifying, setIsNotifying] = useState(false);
   const [showTelegramModal, setShowTelegramModal] = useState(false);
   const [telegramAlertActive, setTelegramAlertActive] = useState(false);
@@ -56,31 +62,80 @@ export default function RateTracker() {
   // Initialized to 40 so when the site opens, it starts at 40 KHR immediately
   const [calcAmount, setCalcAmount] = useState<string>('40');
 
-  const fetchRate = async () => {
+  const fetchRate = async (forceRefresh = false) => {
+    if (manualRefreshRef.current || (!forceRefresh && rateRequestRef.current)) return;
+
+    if (forceRefresh) {
+      manualRefreshRef.current = true;
+      rateRequestRef.current?.abort();
+      setRefreshingRate(true);
+      setRefreshStatus('idle');
+      setRefreshMessage('');
+    }
+
+    const controller = new AbortController();
+    rateRequestRef.current = controller;
+
     try {
-      const res = await fetch('/api/rate');
+      const res = await fetch(forceRefresh ? '/api/rate?refresh=1' : '/api/rate', {
+        cache: forceRefresh ? 'no-store' : 'default',
+        signal: controller.signal,
+      });
       const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `Rate request failed (HTTP ${res.status})`);
+      if (controller.signal.aborted || rateRequestRef.current !== controller) return;
+
       if (data.rate) {
-        setPrevRate(rate);
-        setRate(data.rate);
-        setBid(data.bid);
-        setAsk(data.ask);
+        const nextRate = Number(data.rate);
+        setPrevRate(latestRateRef.current);
+        latestRateRef.current = nextRate;
+        setRate(nextRate);
+        setBid(Number(data.bid));
+        setAsk(Number(data.ask));
         setRateStatus('live');
+
+        if (forceRefresh) {
+          const sourceIsLive = data.source === 'live';
+          setRefreshStatus(sourceIsLive ? 'success' : 'error');
+          setRefreshMessage(sourceIsLive ? 'Rate checked just now.' : 'Wing Bank is unavailable; showing the last saved rate.');
+        }
       } else {
         setRateStatus('retrying');
+        if (forceRefresh) {
+          setRefreshStatus('error');
+          setRefreshMessage(data.error || 'Could not refresh the rate.');
+        }
       }
     } catch (error) {
-      console.error('Error fetching rate:', error);
-      setRateStatus((s) => (s === 'live' ? s : 'retrying'));
+      if (!controller.signal.aborted && rateRequestRef.current === controller) {
+        console.error('Error fetching rate:', error);
+        setRateStatus((s) => (s === 'live' ? s : 'retrying'));
+        if (forceRefresh) {
+          setRefreshStatus('error');
+          setRefreshMessage(error instanceof Error ? error.message : 'Could not refresh the rate.');
+        }
+      }
+    } finally {
+      if (rateRequestRef.current === controller) {
+        rateRequestRef.current = null;
+        if (forceRefresh) {
+          manualRefreshRef.current = false;
+          setRefreshingRate(false);
+        }
+      }
     }
   };
 
   useEffect(() => {
-    fetchRate();
-    setLoading(false);
-
-    const rateInterval = setInterval(fetchRate, 1000);
-    return () => clearInterval(rateInterval);
+    const startupTimer = window.setTimeout(() => {
+      setLoading(false);
+      void fetchRate();
+    }, 0);
+    const rateInterval = window.setInterval(() => void fetchRate(), 1000);
+    return () => {
+      window.clearTimeout(startupTimer);
+      window.clearInterval(rateInterval);
+    };
   }, []);
 
   const requestNotificationPermission = async () => {
@@ -169,9 +224,21 @@ export default function RateTracker() {
           <div className="pointer-events-none absolute -top-20 -right-20 h-64 w-64 rounded-full bg-indigo-500/10 blur-3xl" />
           <div className="pointer-events-none absolute -bottom-24 -left-16 h-64 w-64 rounded-full bg-indigo-500/10 blur-3xl" />
 
-          <h2 className="relative text-slate-400 text-sm font-medium uppercase tracking-[0.2em] mb-3">
-            USD / KHR Exchange Rate
-          </h2>
+          <div className="relative flex items-center justify-center gap-2 mb-3">
+            <h2 className="text-slate-400 text-sm font-medium uppercase tracking-[0.2em]">
+              USD / KHR Exchange Rate
+            </h2>
+            <button
+              type="button"
+              onClick={() => void fetchRate(true)}
+              disabled={refreshingRate}
+              aria-label="Refresh exchange rate now"
+              title={refreshingRate ? 'Refreshing Wing Bank rate…' : 'Refresh rate now'}
+              className="inline-flex items-center justify-center rounded-lg p-2 text-slate-400 transition-colors hover:bg-white/10 hover:text-indigo-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 disabled:cursor-wait disabled:opacity-60"
+            >
+              <RefreshCw className={`h-4 w-4 ${refreshingRate ? 'animate-spin' : ''}`} />
+            </button>
+          </div>
           <div className="relative flex items-center justify-center gap-4 mb-5">
             <span className="text-6xl md:text-8xl font-black tabular-nums text-white drop-shadow-[0_0_25px_rgba(99,102,241,0.4)]">
               {rate ? rate.toLocaleString() : '---'}
@@ -214,11 +281,20 @@ export default function RateTracker() {
               }`}
             />
             {rateStatus === 'live'
-              ? 'Live from Wing Bank · updates every second'
+              ? 'Live from Wing Bank · checked about every 10 seconds'
               : rateStatus === 'retrying'
                 ? 'Live from Wing Bank · retrying…'
                 : 'Live from Wing Bank · connecting…'}
           </p>
+          {refreshMessage && (
+            <p
+              className={`relative mt-2 text-xs ${refreshStatus === 'error' ? 'text-rose-300' : 'text-emerald-300'}`}
+              role="status"
+              aria-live="polite"
+            >
+              {refreshMessage}
+            </p>
+          )}
         </div>
 
         {/* ---- Tiny calculator ---- */}

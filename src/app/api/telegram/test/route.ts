@@ -38,9 +38,11 @@ export async function POST(req: NextRequest) {
     let tokenSource: string;
 
     if (mode === 'webhook') {
-      // Webhook channel only — never silently fall back to the saved bot token.
+      // Webhook channel only — never silently fall back to the saved bot chat.
+      // A stored Chat ID would make sendTelegramWebhookAlert prefer the bot API
+      // (especially when TELEGRAM_BOT_TOKEN is set) and skip the URL being tested.
       webhookUrl = bodyUrl || stored?.webhookUrl || null;
-      chatId = bodyChat || stored?.chatId || null;
+      chatId = bodyChat || null;
       token = null;
       tokenSource = 'the webhook URL';
       if (!webhookUrl) {

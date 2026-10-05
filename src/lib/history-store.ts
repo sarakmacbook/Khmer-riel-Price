@@ -17,7 +17,7 @@
 
 import { activeSignature, getStore, getStoreOrMemory, activeStoreKind, MEMORY_LABEL } from './store';
 import { detectAll } from './store/env';
-import { errMsg, type Point, type StoreKind } from './store/types';
+import { errMsg, type Point, type RecordResult, type StoreKind } from './store/types';
 
 export interface Tick {
   rate: number;
@@ -69,15 +69,19 @@ export async function getLatestTick(): Promise<Tick | null> {
   return { rate: row.bid, bid: row.bid, ask: row.ask, timestamp: new Date(row.t).toISOString() };
 }
 
-/** Persist a tick. No-ops safely (returns false) when the backend is unavailable. */
-export async function saveTick(q: { rate: number; bid: number; ask: number }): Promise<boolean> {
+/**
+ * Persist a tick and return the store's atomic before/after result. Returning
+ * the previous quote lets callers fire alerts only for the request that really
+ * recorded a price move (instead of racing a separate `latest()` read).
+ * Returns null when persistence fails so live-rate responses can still proceed.
+ */
+export async function saveTick(q: { rate: number; bid: number; ask: number }): Promise<RecordResult | null> {
   try {
     const store = await getStoreOrMemory();
-    await store.record({ bid: q.bid, ask: q.ask }, Date.now());
-    return true;
+    return await store.record({ bid: q.bid, ask: q.ask }, Date.now());
   } catch (error) {
     console.error('saveTick failed (continuing):', error);
-    return false;
+    return null;
   }
 }
 
