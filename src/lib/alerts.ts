@@ -205,13 +205,26 @@ export interface NotifyResult {
  * the previous quote). When there is no previous quote (first tick, empty or
  * reset history) nothing is sent — an alert can only react to a real move.
  */
-export async function notifyRateChange(prev: { bid: number; ask: number } | null, quote: WingBankQuote): Promise<NotifyResult> {
-  const store = await getStoreOrMemory();
-  const alerts = (await store.listAlerts()).filter((a) => a.active && hasDeliveryTarget(a));
+export async function notifyRateChange(
+  prev: { bid: number; ask: number } | null,
+  quote: WingBankQuote,
+  storeOverride?: RateStore,
+): Promise<NotifyResult> {
+  const store = storeOverride ?? (await getStoreOrMemory());
+  const allAlerts = await store.listAlerts();
+  const alerts = allAlerts.filter((a) => a.active && hasDeliveryTarget(a));
   if (alerts.length === 0) return { matched: 0, delivered: 0 };
 
   const moved = prev !== null && (prev.bid !== quote.bid || prev.ask !== quote.ask);
   if (!moved) return { matched: 0, delivered: 0 };
+
+  // `/alert` subscriptions do not each store a copy of the bot token. Use the
+  // dashboard bot token (or TELEGRAM_BOT_TOKEN) for those chats too, otherwise
+  // subscriptions silently fail when the token was entered in the UI only.
+  const webAlert = allAlerts
+    .filter((a) => a.source === 'web')
+    .sort((a, b) => b.createdAt - a.createdAt)[0];
+  const defaultBotToken = effectiveBotToken(webAlert ?? { botToken: null });
 
   const results = await Promise.all(
     alerts.map(async (alert) => {
@@ -228,7 +241,7 @@ export async function notifyRateChange(prev: { bid: number; ask: number } | null
       const text = renderAlertMessage({ prev, quote, customMessage: alert.customMessage });
       const res = await sendTelegramWebhookAlert({
         webhookUrl: alert.webhookUrl,
-        botToken: alert.botToken,
+        botToken: isUsableSecret(alert.botToken) ? alert.botToken : defaultBotToken,
         chatId: alert.chatId,
         text,
       });

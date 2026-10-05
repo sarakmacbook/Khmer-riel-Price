@@ -96,13 +96,20 @@ curl -X POST "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setWebhook?url=https:
 ```
 
 ### 5. Set up Rate Updates (Cron Job)
-The app needs to fetch rates from Wing Bank periodically. Add this to your VPS crontab:
+The Docker Compose poller checks Wing Bank every 10 seconds. If you run the app
+without Docker Compose, use a cron job to check once per minute (the fastest
+standard cron cadence):
 ```bash
 crontab -e
 ```
-Add this line to update the rate every 5 minutes:
+Add this line:
 ```cron
-*/5 * * * * curl -s https://your-domain.com/api/cron/update-rate > /dev/null 2>&1
+* * * * * curl -fsS https://your-domain.com/api/cron/update-rate > /dev/null 2>&1
+```
+
+If you set `CRON_SECRET`, include the bearer header in the cron command:
+```cron
+* * * * * curl -fsS -H "Authorization: Bearer YOUR_CRON_SECRET" https://your-domain.com/api/cron/update-rate > /dev/null 2>&1
 ```
 
 ## 🌐 Domain & SSL

@@ -20,7 +20,9 @@ const WING_URLS = [
   'https://www.wingbank.com.kh/en/exchange-rate',
 ];
 
-const CACHE_TTL_MS = 30_000;
+// Short enough for near-real-time alerting while still limiting Wing Bank
+// traffic when the dashboard polls the live-rate endpoint once per second.
+const CACHE_TTL_MS = 10_000;
 const FETCH_TIMEOUT_MS = 9_500;
 let cache: { quote: WingBankQuote; at: number } | null = null;
 
@@ -76,8 +78,8 @@ function parseWingBankHtml(html: string): WingBankQuote | null {
  * Scraper with timeout, dual-URL fallback and a short cache so 1s client
  * polling never hammers the bank site (and never hangs a serverless function).
  */
-export async function fetchWingBankQuote(): Promise<WingBankQuote> {
-  const fresh = getFreshQuote();
+export async function fetchWingBankQuote(options: { force?: boolean } = {}): Promise<WingBankQuote> {
+  const fresh = options.force ? null : getFreshQuote();
   if (fresh) return fresh;
 
   async function attempt(url: string): Promise<WingBankQuote> {
@@ -108,8 +110,10 @@ export async function fetchWingBankQuote(): Promise<WingBankQuote> {
     results.find((r): r is PromiseRejectedResult => r.status === 'rejected')?.reason ??
     new Error('Wing Bank scrape failed');
 
-  // Serve the last known good quote so the dashboard keeps living
-  if (cache) return cache.quote;
+  // Regular polling can serve the last known good quote so the dashboard keeps
+  // living. A user-requested forced refresh must report scrape failure instead
+  // of presenting an old cached quote as freshly checked.
+  if (cache && !options.force) return cache.quote;
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 

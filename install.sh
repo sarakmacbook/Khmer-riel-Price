@@ -10,7 +10,7 @@
 #    [3/7] Write .env
 #    [4/7] docker-compose up -d --build  (Postgres + app + rate sidecar)
 #    [5/7] Register the Telegram webhook
-#    [6/7] Install the 5-minute rate-update cron
+#    [6/7] Install the per-minute rate-update cron
 #    [7/7] Create database tables (drizzle-kit push)
 #
 #  One-liner (works from any directory, downloads all files first):
@@ -134,9 +134,13 @@ echo "Telegram Response: $RESPONSE"
 # [6/7] Setup Cron Job for Rates
 # ------------------------------------------------------------
 echo -e "${GREEN}[6/7] Setting up automated rate updates (Cron)...${NC}"
-CRON_JOB="*/5 * * * * curl -s https://$DOMAIN/api/cron/update-rate > /dev/null 2>&1"
-if ! crontab -l 2>/dev/null | grep -qF "/api/cron/update-rate"; then
-    (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -
+CRON_JOB="* * * * * curl -fsS https://$DOMAIN/api/cron/update-rate > /dev/null 2>&1"
+CURRENT_CRON=$(crontab -l 2>/dev/null || true)
+if ! printf '%s\n' "$CURRENT_CRON" | grep -qF "$CRON_JOB"; then
+    {
+        printf '%s\n' "$CURRENT_CRON" | grep -vF "/api/cron/update-rate" || true
+        echo "$CRON_JOB"
+    } | crontab -
 fi
 
 # ------------------------------------------------------------
@@ -151,7 +155,7 @@ echo -e "${BLUE}==================================================${NC}"
 echo -e "${GREEN}✅ Installation Complete!${NC}"
 echo -e "🌐 Your site:   ${BLUE}https://$DOMAIN${NC}"
 echo -e "🤖 Bot webhook: ${BLUE}registered${NC}"
-echo -e "⏰ Rates:       ${BLUE}updates every 5 minutes via Cron${NC}"
+echo -e "⏰ Rates:       ${BLUE}checked every 10 seconds by Docker; alerts sent on detected changes${NC}"
 echo -e "📁 Files:       ${BLUE}$(pwd)${NC}"
 echo -e "${BLUE}==================================================${NC}"
 echo -e "💡 NOTE: Point $DOMAIN at port 3000 with a reverse proxy"

@@ -1,29 +1,31 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { fetchWingBankQuote } from '@/lib/scraper';
 import { getLatestTick, saveTick, storeBackend } from '@/lib/history-store';
+import { notifyRateChange } from '@/lib/alerts';
 
 export const dynamic = 'force-dynamic';
 // Give the Wing Bank scrape room to finish on a cold start without being
 // killed by the serverless function limit.
 export const maxDuration = 30;
 
-// CDN cache so 1-second client polling hits Vercel's edge cache instead of
-// invoking the function every second (protects the Hobby plan quota).
+// Keep the edge cache short so active clients notice bank rate changes quickly.
+// The scraper has its own short cache to avoid hammering Wing Bank.
 const CDN_CACHE = {
-  'Cache-Control': 'public, s-maxage=5, stale-while-revalidate=30',
+  'Cache-Control': 'public, s-maxage=2, max-age=0',
 };
 const NO_STORE = { 'Cache-Control': 'no-store' };
 
 /**
  * Live rate endpoint — works with ANY free-tier store (or none at all):
- *   1. scrape Wing Bank live (30s server cache, 9.5s timeout, dual URL race)
+ *   1. scrape Wing Bank live (10s server cache, 9.5s timeout, dual URL race)
  *   2. fall back to the latest stored tick (Postgres / Turso / Upstash / memory)
  *   3. 503 only if BOTH are unavailable
  */
 export async function GET(req: NextRequest) {
+  const forceRefresh = req.nextUrl.searchParams.get('refresh') === '1';
   let quote = null;
   try {
-    quote = await fetchWingBankQuote();
+    quote = await fetchWingBankQuote({ force: forceRefresh });
   } catch (error) {
     console.error('live scrape failed, falling back to stored tick:', error);
   }
@@ -51,12 +53,20 @@ export async function GET(req: NextRequest) {
     : latest?.timestamp ?? new Date().toISOString();
 
   // Best-effort: persist a tick (visitor traffic keeps history flowing even
-  // if the cron has not run yet).
+  // if the cron has not run yet). Use the atomic record result to alert on a
+  // move here too; otherwise this endpoint could save the new price first and
+  // leave the cron seeing no change. Send immediately after recording it.
   if (quote) {
-    try {
-      await saveTick({ rate: quote.bid, bid: quote.bid, ask: quote.ask });
-    } catch (error) {
-      console.error('could not store tick (continuing):', error);
+    const recorded = await saveTick({ rate: quote.bid, bid: quote.bid, ask: quote.ask });
+    if (recorded?.changed && recorded.prev) {
+      const previous = { bid: recorded.prev.bid, ask: recorded.prev.ask };
+      try {
+        const result = await notifyRateChange(previous, quote);
+        if (result.error) console.error('[rate] telegram alert failed:', result.error);
+      } catch (error) {
+        // Telegram must never make the live-rate endpoint fail.
+        console.error('[rate] telegram alerts failed:', error instanceof Error ? error.message : String(error));
+      }
     }
   }
 
@@ -72,6 +82,6 @@ export async function GET(req: NextRequest) {
       store, // postgres | turso | upstash | memory
       database: store !== 'memory',
     },
-    { headers: quote ? CDN_CACHE : NO_STORE },
+    { headers: !forceRefresh && quote ? CDN_CACHE : NO_STORE },
   );
 }
