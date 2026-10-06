@@ -79,7 +79,8 @@ const g = globalThis as typeof globalThis & {
 const pending = () => (g.__wingrateBotPending ??= new Map<string, Pending>());
 
 const HTML_ESCAPE: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;' };
-const esc = (s: string) => s.replace(/[&<>]/g, (c) => HTML_ESCAPE[c]);
+/** Escape user-supplied text for Telegram's HTML parse mode. */
+export const esc = (s: string) => s.replace(/[&<>]/g, (c) => HTML_ESCAPE[c]);
 
 // ---------------------------------------------------------------------------
 // Authorization
@@ -221,6 +222,8 @@ export function databaseMenuKeyboard(link?: LinkStatus | null): InlineKeyboard {
   } else {
     rows.push([{ text: '🔗 Link backup database', callback_data: 'db:link' }, { text: '🧬 Sync data', callback_data: 'db:linksync' }]);
   }
+  // 📤📥 Export/import lives in its own flow (lib/bot-export) — one tap away here.
+  rows.push([{ text: '📤 Export & import', callback_data: 'exp:menu' }]);
   rows.push([{ text: '♻️ Refresh status', callback_data: 'db:menu' }, { text: '⏏️ Disconnect', callback_data: 'db:off' }]);
   rows.push([{ text: '✖️ Close', callback_data: 'db:close' }]);
   return rows;
@@ -289,7 +292,8 @@ export interface BotContext {
   chatId: string;
 }
 
-async function present(
+/** Edit a menu in place when possible, otherwise send a new message. */
+export async function present(
   ctx: BotContext,
   text: string,
   keyboard: InlineKeyboard | undefined,

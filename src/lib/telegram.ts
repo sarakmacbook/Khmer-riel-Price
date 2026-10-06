@@ -15,6 +15,12 @@ export const TELEGRAM_API_BASE = (process.env.TELEGRAM_API_URL || 'https://api.t
 /** Telegram can hang; never let a slow call pin a serverless function. */
 const SEND_TIMEOUT_MS = Number(process.env.TELEGRAM_TIMEOUT_MS) || 10_000;
 
+/** Uploading/downloading files is slower than a message — its own, longer budget. */
+const FILE_TIMEOUT_MS = Number(process.env.TELEGRAM_FILE_TIMEOUT_MS) || 60_000;
+
+/** Telegram refuses `getFile` downloads above this size (bot API limit). */
+export const TELEGRAM_DOWNLOAD_LIMIT = 20 * 1024 * 1024;
+
 /**
  * True only for a value that can actually be used as a secret.
  * Empty strings and UI masks ("••••••••") are rejected — sending the mask to
@@ -41,6 +47,30 @@ interface TelegramResponse {
   networkError?: string;
 }
 
+/** Read a Telegram reply, tolerating non-JSON bodies (proxy error pages, empty bodies). */
+async function readResponse(res: Response): Promise<TelegramResponse> {
+  const text = await res.text();
+  let data: TelegramResponse['data'] = null;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = null;
+  }
+  return { ok: res.ok && data?.ok !== false, status: res.status, data };
+}
+
+/** Transport-level failure (DNS, timeout, TLS) reported like an HTTP response. */
+function transportFailure(err: unknown, timeoutMs: number): TelegramResponse {
+  const reason = err instanceof Error ? err.message : String(err);
+  const timedOut = err instanceof Error && err.name === 'TimeoutError';
+  return {
+    ok: false,
+    status: 0,
+    data: null,
+    networkError: timedOut ? `Telegram did not respond within ${timeoutMs / 1000}s` : reason || 'Network error',
+  };
+}
+
 /** POST JSON to `url`, tolerating non-JSON bodies and hung connections. */
 async function postJson(url: string, body: unknown): Promise<TelegramResponse> {
   try {
@@ -50,23 +80,23 @@ async function postJson(url: string, body: unknown): Promise<TelegramResponse> {
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
     });
-    const text = await res.text();
-    let data: TelegramResponse['data'] = null;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      data = null; // HTML error page from a proxy, empty body, …
-    }
-    return { ok: res.ok && data?.ok !== false, status: res.status, data };
+    return await readResponse(res);
   } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err);
-    const timedOut = err instanceof Error && err.name === 'TimeoutError';
-    return {
-      ok: false,
-      status: 0,
-      data: null,
-      networkError: timedOut ? `Telegram did not respond within ${SEND_TIMEOUT_MS / 1000}s` : reason || 'Network error',
-    };
+    return transportFailure(err, SEND_TIMEOUT_MS);
+  }
+}
+
+/** POST a multipart/form-data body — used to upload export files. */
+async function postForm(url: string, form: FormData): Promise<TelegramResponse> {
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      body: form,
+      signal: AbortSignal.timeout(FILE_TIMEOUT_MS),
+    });
+    return await readResponse(res);
+  } catch (err) {
+    return transportFailure(err, FILE_TIMEOUT_MS);
   }
 }
 
@@ -196,6 +226,158 @@ export async function answerCallbackQuery(
     ...(options.showAlert ? { show_alert: true } : {}),
   });
   return res.ok ? { success: true } : { success: false, error: describeFailure(res, 'Telegram API error') };
+}
+
+// ---------------------------------------------------------------------------
+// Files (export / import)
+// ---------------------------------------------------------------------------
+
+/** A document the bot sends to a chat. */
+export interface OutgoingDocument {
+  filename: string;
+  /** UTF-8 text (encoded here) or raw bytes. */
+  content: string | Uint8Array;
+  mimeType?: string;
+}
+
+export interface SendDocumentOptions {
+  caption?: string;
+  keyboard?: InlineKeyboard;
+  /** Send silently (no notification sound). */
+  silent?: boolean;
+}
+
+/** Telegram caps a document caption at 1024 characters. */
+const CAPTION_LIMIT = 1024;
+const trimCaption = (caption: string) => (caption.length <= CAPTION_LIMIT ? caption : `${caption.slice(0, CAPTION_LIMIT - 1)}…`);
+
+/**
+ * Upload a file with `sendDocument` (multipart/form-data).
+ *
+ * If Telegram rejects the caption's HTML entities (a database label can contain
+ * anything), the caption is retried as plain text instead of losing the export.
+ */
+export async function sendTelegramDocument(
+  botToken: string,
+  chatId: string,
+  doc: OutgoingDocument,
+  options: SendDocumentOptions = {},
+): Promise<SendTelegramMessageResult> {
+  const token = (botToken ?? '').trim();
+  const chat = normalizeChatId(chatId);
+  if (!isUsableSecret(token)) {
+    return { success: false, error: 'No bot token — add TELEGRAM_BOT_TOKEN to your environment or enter one in the UI.' };
+  }
+  if (!chat) return { success: false, error: 'No Telegram Chat ID — open the bell menu and fill in your Chat ID.' };
+  if (!doc?.filename) return { success: false, error: 'Refusing to send a file without a name.' };
+
+  // Copied into a plain ArrayBuffer-backed view so it can be uploaded as-is.
+  const bytes =
+    typeof doc.content === 'string' ? new TextEncoder().encode(doc.content) : Uint8Array.from(doc.content);
+  if (bytes.byteLength === 0) return { success: false, error: 'Refusing to send an empty file.' };
+
+  const build = (caption: string | null, html: boolean) => {
+    const form = new FormData();
+    form.append('chat_id', chat);
+    form.append('document', new Blob([bytes], { type: doc.mimeType ?? 'application/octet-stream' }), doc.filename);
+    if (caption) {
+      form.append('caption', trimCaption(caption));
+      if (html) form.append('parse_mode', 'HTML');
+    }
+    if (options.silent) form.append('disable_notification', 'true');
+    if (options.keyboard) form.append('reply_markup', JSON.stringify(replyMarkup(options.keyboard)));
+    return form;
+  };
+
+  let res = await postForm(`${TELEGRAM_API_BASE}/bot${token}/sendDocument`, build(options.caption ?? null, true));
+  const description = res.data?.description ?? '';
+  if (!res.ok && options.caption && /parse|entit/i.test(description)) {
+    // The caption had broken markup — the file itself is fine, send it as text.
+    res = await postForm(
+      `${TELEGRAM_API_BASE}/bot${token}/sendDocument`,
+      build(options.caption.replace(/<[^>]+>/g, ''), false),
+    );
+  }
+  if (!res.ok) return { success: false, error: describeFailure(res, 'Telegram API error') };
+  const messageId = (res.data?.result as { message_id?: number } | undefined)?.message_id;
+  return { success: true, messageId };
+}
+
+/** Where a document lives on Telegram's file server, as `getFile` reports it. */
+export interface TelegramFileInfo {
+  fileId: string;
+  fileUniqueId: string | null;
+  /** Size in bytes, when Telegram reports one. */
+  fileSize: number | null;
+  filePath: string;
+}
+
+export interface TelegramDownload extends SendTelegramMessageResult {
+  bytes?: Uint8Array;
+  info?: TelegramFileInfo;
+}
+
+/**
+ * Download a document a user sent to the bot (two steps: `getFile`, then the
+ * file server). Refuses files above `maxBytes` — Telegram itself caps bot
+ * downloads at 20 MB.
+ */
+export async function downloadTelegramFile(
+  botToken: string,
+  fileId: string,
+  options: { maxBytes?: number } = {},
+): Promise<TelegramDownload> {
+  const token = (botToken ?? '').trim();
+  if (!isUsableSecret(token)) return { success: false, error: 'No bot token available.' };
+  if (!fileId) return { success: false, error: 'No file id in this message.' };
+  const maxBytes = Math.max(1, options.maxBytes ?? TELEGRAM_DOWNLOAD_LIMIT);
+
+  const meta = await postJson(`${TELEGRAM_API_BASE}/bot${token}/getFile`, { file_id: fileId });
+  if (!meta.ok) return { success: false, error: describeFailure(meta, 'Telegram API error') };
+
+  const result = meta.data?.result as { file_id?: string; file_unique_id?: string; file_size?: number; file_path?: string } | undefined;
+  const filePath = result?.file_path;
+  if (!filePath) return { success: false, error: 'Telegram did not return a download path for this file.' };
+
+  const info: TelegramFileInfo = {
+    fileId: result?.file_id ?? fileId,
+    fileUniqueId: result?.file_unique_id ?? null,
+    fileSize: typeof result?.file_size === 'number' ? result.file_size : null,
+    filePath,
+  };
+  if (info.fileSize !== null && info.fileSize > maxBytes) {
+    return { success: false, error: `The file is ${humanBytes(info.fileSize)} — larger than the ${humanBytes(maxBytes)} import limit.`, info };
+  }
+
+  try {
+    const res = await fetch(`${TELEGRAM_API_BASE}/file/bot${token}/${filePath}`, {
+      signal: AbortSignal.timeout(FILE_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      const body = await readResponse(res);
+      return { success: false, error: describeFailure(body, 'Telegram file download error'), info };
+    }
+    const announced = Number(res.headers.get('content-length') ?? '');
+    if (Number.isFinite(announced) && announced > maxBytes) {
+      return { success: false, error: `The file is ${humanBytes(announced)} — larger than the ${humanBytes(maxBytes)} import limit.`, info };
+    }
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (bytes.byteLength > maxBytes) {
+      return { success: false, error: `The file is ${humanBytes(bytes.byteLength)} — larger than the ${humanBytes(maxBytes)} import limit.`, info };
+    }
+    return { success: true, bytes, info };
+  } catch (err) {
+    const failed = transportFailure(err, FILE_TIMEOUT_MS);
+    return { success: false, error: describeFailure(failed, 'Telegram file download error'), info };
+  }
+}
+
+/** `128 KB` / `3.4 MB` — file sizes as they appear in the chat. */
+export function humanBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return 'unknown size';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 export interface SendTelegramAlertParams {

@@ -15,6 +15,7 @@ Real-time **USD/KHR exchange rate tracker** scraped from **[Wing Bank](https://w
 - 🤖 **Telegram** — bot commands + webhook alerts (`only on price move` / `rate above` / `rate below`), with a **custom alert message** template, configured from the UI next to the bell icon
 - 🗄 **Connect a database from Telegram** — `/database` menu to connect, switch, test or disconnect Postgres · Turso · MongoDB · Upstash · Redis · Vercel Blob at runtime, no redeploy or env edits
 - 🔗 **Backup database & automatic failover** — link a second database (any supported kind): every write is mirrored into it, it takes over within the same request if the primary goes down, and the app returns to the primary automatically — `/link`, `/sync`, `/promote`, or `POST /api/database`
+- 📤 **Export & import from Telegram** — `/export` sends the whole database to the chat as a **JSON** (history + alert subscriptions) or **CSV** file; `/import` reads such a file back, showing what it holds and offering **merge** (idempotent, never duplicates) or **replace** — a backup you can keep, move to another deployment, or open in a spreadsheet
 - ⏱ **All-time tick history** in any supported database, checked every 10 seconds by the VPS/Docker poller (and while the dashboard is open)
 - ▲ **Vercel-deployable** and **Docker-compose** self-hostable
 
@@ -133,7 +134,7 @@ bash scripts/update-rates.sh    # every 10 sec by default (override RATE_UPDATE_
 | GET/POST/DELETE | `/api/database` | Read the active database · connect/switch one · disconnect · **link/unlink a backup, copy data, promote the backup** (writes need `ADMIN_SECRET`/`CRON_SECRET`) |
 | GET | `/api/database/link` | Backup database health: which side is serving, rows/latency on both, failover counters, sync state (`?fresh=1` forces a real re-check) — safe to poll, no secrets |
 | POST/DELETE | `/api/database/link` | Link a backup database (`{kind,url,token}` + options) · unlink (writes need the admin secret) |
-| POST | `/api/bot/webhook` | Telegram bot updates — `/start` `/rate` `/alert` `/stop` `/database` `/connect` `/link` `/sync` `/promote` `/unlink` |
+| POST | `/api/bot/webhook` | Telegram bot updates — `/start` `/rate` `/alert` `/stop` `/database` `/connect` `/link` `/sync` `/promote` `/unlink` `/export` `/import` |
 | GET/POST | `/api/cron/update-rate` | Scrape rate → store tick → fire Telegram alerts → repair the backup if it fell behind |
 
 ---
@@ -160,6 +161,10 @@ bash scripts/update-rates.sh    # every 10 sec by default (override RATE_UPDATE_
 | `LINK_STATUS_TTL_MS` | Optional — cache for the two-sided status probe, default `5000` |
 | `LINK_COPY_LIMIT` / `LINK_RESYNC_LIMIT` | Optional — max history rows per manual copy (default `20000`) and per automatic catch-up (default `5000`) |
 | `LINK_MAX_LAG_SECONDS` | Optional — how far behind the backup may get before the cron repairs it, default `900` |
+| `EXPORT_LIMIT` | Optional — max history rows in one `/export` file, default `50000` (the newest rows win, and the file says it was truncated) |
+| `EXPORT_MAX_MB` | Optional — upload budget for an export, default `20` (the export is shrunk to fit rather than failing Telegram's 50 MB limit) |
+| `IMPORT_MAX_MB` | Optional — largest file `/import` accepts, default `5` (Telegram itself caps bot downloads at 20 MB) |
+| `TELEGRAM_FILE_TIMEOUT_MS` | Optional — timeout for uploading/downloading a file, default `60000` |
 
 > **Telegram alerts work with any storage backend.** Alert settings and bot
 > subscriptions are read/written through the same storage layer as the price
@@ -382,6 +387,61 @@ curl -X POST https://your-app.vercel.app/api/database \
 
 ---
 
+## 📤 Export & import from Telegram
+
+`/export` writes the **active** database to a file and sends it to the chat;
+`/import` reads such a file back — into whichever database is connected at that
+moment. Nothing has to be redeployed or taken offline, and the files are plain
+text (JSON or CSV), so they also work as an off-site backup or a way to move
+data between deployments.
+
+| Action | How |
+| ------ | --- |
+| Export everything | `/export` (JSON: price history **+** alert subscriptions) |
+| Export for a spreadsheet | `/export csv` (history only: `t,iso,bid,ask`) |
+| Export alerts only | `/export json alerts` |
+| Export from the menu | `/export` → **📤 Export options**, or the 📤📥 card in `/database` |
+| Import | Send the file as a **document**, or **reply** `/import` to one already in the chat |
+| Choose what happens | The preview card offers **⬇️ Merge** (adds only what is missing) or **♻️ Replace** (erases the history — and the alerts, when the file has them — first) |
+| Keep credentials out of the chat | When the file carried alert credentials, the result card offers **🧹 Delete the file message** |
+
+**How it behaves**
+
+- 🔎 **Idempotent imports** — the file is written through the same copy pipeline
+  as the 🔗 backup feature: history rows are de-duplicated on
+  `(timestamp, bid, ask)` and alert subscriptions on their natural key
+  (chat/webhook + condition + target). Importing the same file twice reports
+  *“0 copied, N already there”* and changes nothing.
+- 🛑 **Nothing is written before you confirm** — the file is downloaded, parsed
+  and summarised first; the write only happens on the Merge/Replace button, and
+  Replace asks a second time.
+- 🧾 **Forgiving readers** — a JSON export from `/export`, a JSON array of
+  `{t,bid,ask}` (or `{timestamp, rate}`, epoch seconds, ISO dates …), or a CSV
+  with a `t,bid,ask` / `timestamp,buy,sell` header all import. Rows that cannot
+  be read are counted and reported instead of failing the file.
+- 🧱 **Bounded** — `EXPORT_LIMIT` rows and `EXPORT_MAX_MB` bytes per export (the
+  newest rows win, and the caption says the file is truncated); imports refuse
+  files above `IMPORT_MAX_MB` (default 5 MB) *before* downloading them.
+- 🗄 **Works on every backend** — Postgres · Turso · MongoDB · Upstash · Redis ·
+  Vercel Blob · memory (merge needs bulk insert, replace also needs erase; a
+  backend that cannot erase it refuses the replace and suggests merge).
+- 🔒 **Owner only** — the same rule as the 🗄 menu (`TELEGRAM_ADMIN_CHAT_ID`, or
+  the first chat that claimed ownership).
+- 🔐 **Credentials in the file** — a JSON export contains the alert
+  subscriptions, including webhook URLs and bot tokens, so it can restore a
+  deployment completely; the caption says so, masked tokens are never written,
+  and you can delete the message afterwards.
+
+```text
+/export                     → 📄 wingrate-export-20261006-0042.json  (27 KB, 365 rows, 2 alerts)
+/export csv                 → 📊 wingrate-rates-20261006-0042.csv    (365 rows, history only)
+/import                     → how to send a file
+<send the .json file>       → 📥 preview: 365 rows · 2025-10-06 → 2026-10-05 · 2 alerts · into 🐘 Neon
+                              [⬇️ Merge]  [♻️ Replace]  [✖️ Cancel]
+```
+
+---
+
 ## 🗂 Project structure
 
 ```
@@ -399,24 +459,33 @@ src/
     scraper.ts              ← Wing Bank scraper (cheerio)
     telegram.ts             ← Telegram send helpers (messages, buttons, callbacks)
     bot-database.ts         ← 🗄 Telegram database menu (connect/switch/test/disconnect + 🔗 backup)
+    bot-export.ts           ← 📤📥 Telegram /export & /import (preview card, merge/replace)
+    export-file.ts          ← the export file format: encode/decode JSON + CSV, validation, limits
     db-config.ts            ← runtime database choice: file / DB_CONFIG_JSON / ownership / linked backup
     db-actions.ts           ← connect · disconnect · test · link backup · sync · promote
     link-jobs.ts            ← cron caretaker: failover catch-up + mirror repair
     store/                  ← storage layer: postgres · turso · mongodb · redis · blob · memory
     store/linked.ts         ← two databases joined: mirror, failover, auto-return, re-sync
     store/transfer.ts       ← copying history + alerts between databases (idempotent)
+    store/file.ts           ← an import file exposed as a read-only store (source of the copy)
 ```
 
 ---
 
 ## 🧪 Tests
 
-The backup/failover feature ships with two runnable checks (no database
-account needed — they use the in-memory and a local HTTP store):
+The backup/failover and export/import features ship with runnable checks (no
+database account or bot token needed — they use the in-memory store and a local
+HTTP server that speaks the Telegram Bot API):
 
 ```bash
 npm run test:link          # 59 checks: env scoping, mirroring, failover, auto-return,
                            # catch-up, idempotent/merge/replace copies, masking
+
+npm run test:export        # 89 checks for 📤📥 export/import: JSON & CSV round trips,
+                           # tolerant readers, limits, merge/replace/idempotency — and the
+                           # whole Telegram conversation against a local fake Bot API
+                           # (document upload + download, preview card, buttons)
 
 node scripts/fake-blob-server.mjs &   # stands in for a cloud store over HTTP
 npm run test:link:live                # 25 checks end to end: two real HTTP-backed

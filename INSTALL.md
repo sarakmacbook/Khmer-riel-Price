@@ -89,6 +89,26 @@ curl -X POST https://your-domain.com/api/database -H "x-admin-secret: $ADMIN_SEC
 curl https://your-domain.com/api/database/link        # health of both databases
 ```
 
+### 3d. 📤📥 Back up (or move) the data with /export and /import
+
+Send **`/export`** and the bot posts the active database into the chat as a file:
+`wingrate-export-*.json` (price history **+** alert subscriptions) or
+**`/export csv`** for a spreadsheet of the history.
+
+To restore or move it, send that file back to the bot as a **document** (or reply
+**`/import`** to it). The bot reads the file, shows what it holds, and asks:
+
+- **⬇️ Merge** — adds only what is missing (safe to repeat: importing the same
+  file twice copies nothing, rows are de-duplicated on `(time, bid, ask)`);
+- **♻️ Replace** — erases the stored history (and the alerts, when the file has
+  them) first, then writes the file. Asks for a second confirmation.
+
+Nothing is written before you confirm, imports above `IMPORT_MAX_MB` (default
+5 MB) are refused before downloading, and a JSON export that contains alert
+credentials can be deleted from the chat with the 🧹 button afterwards. Working
+files, not just backups: the CSV opens in Excel/Numbers/Google Sheets, and rows
+a backend cannot read (bad time, missing rate) are reported instead of failing.
+
 ### 4. Set up Telegram Webhook
 To make the bot work, you must tell Telegram where to send messages:
 ```bash

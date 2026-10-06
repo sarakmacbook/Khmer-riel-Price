@@ -11,9 +11,18 @@ import {
   handleDatabaseValueMessage,
   looksLikeDatabaseValue,
 } from '@/lib/bot-database';
+import {
+  EXPORT_HELP,
+  handleExportImportCallback,
+  handleExportImportCommand,
+  handleExportImportFile,
+  type BotDocumentRef,
+  type BotFileMessage,
+} from '@/lib/bot-export';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 30;
+/** Imports download and write a whole file — more than the default budget. */
+export const maxDuration = 60;
 
 const HELP =
   `👋 <b>Wing Bank KHR/USD Tracker</b>\n\n` +
@@ -23,15 +32,36 @@ const HELP =
   `• /database — 🗄 connect, switch, test or disconnect the app's database\n` +
   `• /link — 🔗 add a 2nd database as a live backup (mirror + automatic failover)\n` +
   `• /sync — 🧬 copy history & alerts between the linked databases\n` +
+  `• /export — 📤 download the database to this chat as a file (JSON or CSV)\n` +
+  `• /import — 📥 read an export file back into the database\n` +
   `• /help — show this message`;
 
 type Chat = { id?: number | string };
-type TgMessage = { message_id?: number; chat?: Chat; text?: string };
+type TgDocument = { file_id?: string; file_name?: string; mime_type?: string; file_size?: number };
+type TgMessage = {
+  message_id?: number;
+  chat?: Chat;
+  text?: string;
+  caption?: string;
+  document?: TgDocument;
+  reply_to_message?: TgMessage;
+};
 type TgUpdate = {
   message?: TgMessage;
   channel_post?: TgMessage;
   callback_query?: { id: string; data?: string; message?: TgMessage; from?: { id?: number } };
 };
+
+/** The bits of a Telegram document the export/import flow needs. */
+function documentRef(doc: TgDocument | undefined): BotDocumentRef | null {
+  if (!doc?.file_id) return null;
+  return {
+    fileId: doc.file_id,
+    fileName: doc.file_name ?? null,
+    mimeType: doc.mime_type ?? null,
+    fileSize: typeof doc.file_size === 'number' ? doc.file_size : null,
+  };
+}
 
 /** The effective bot token: the one saved on the dashboard, else TELEGRAM_BOT_TOKEN. */
 async function botToken(): Promise<string> {
@@ -67,8 +97,9 @@ async function currentQuote() {
  * Telegram webhook endpoint (registered with BotFather's setWebhook, or by
  * install.sh step 5/7).
  *
- * Handles the rate commands, alert subscriptions AND the 🗄 database menu
- * (inline buttons + /database, /connect). Always answers 200: Telegram retries
+ * Handles the rate commands, alert subscriptions, the 🗄 database menu
+ * (inline buttons + /database, /connect) and 📤📥 export/import (a file is sent
+ * to the chat, or received from it). Always answers 200: Telegram retries
  * non-2xx deliveries and disables the webhook after enough failures, so an
  * internal error must never be returned as a 5xx to Telegram itself.
  */
@@ -92,6 +123,8 @@ export async function POST(req: NextRequest) {
       const token = await botToken();
       if (chatId && cq.message?.message_id && data.startsWith('db:')) {
         await handleDatabaseCallback({ token, chatId }, cq.message.message_id, data, cq.id);
+      } else if (chatId && cq.message?.message_id && data.startsWith('exp:')) {
+        await handleExportImportCallback({ token, chatId }, cq.message.message_id, data, cq.id);
       } else {
         // Acknowledge anyway, otherwise the client keeps spinning on the button.
         await answerCallbackQuery(token, cq.id);
@@ -102,8 +135,17 @@ export async function POST(req: NextRequest) {
     const update = body?.message ?? body?.channel_post;
     const chatIdRaw = update?.chat?.id;
     const text = (update?.text ?? '').trim();
+    const caption = (update?.caption ?? '').trim();
+    const document = documentRef(update?.document);
+    const replyDocument = documentRef(update?.reply_to_message?.document);
+    const fileMessage: BotFileMessage = {
+      messageId: update?.message_id,
+      document,
+      replyDocument,
+      replyMessageId: update?.reply_to_message?.message_id,
+    };
 
-    if (chatIdRaw === undefined || !text) {
+    if (chatIdRaw === undefined || (!text && !caption && !document && !replyDocument)) {
       return NextResponse.json({ ok: true });
     }
     const chatId = String(chatIdRaw);
@@ -112,14 +154,21 @@ export async function POST(req: NextRequest) {
 
     // ---- 🗄 Database menu (owner only) ----
     // /database, /db, /storage, /connect …
-    if (await handleDatabaseCommand(ctx, text, update?.message_id)) return NextResponse.json({ ok: true });
+    if (text && (await handleDatabaseCommand(ctx, text, update?.message_id))) return NextResponse.json({ ok: true });
     // A connection string pasted right after picking a type in the menu.
-    if (looksLikeDatabaseValue(text) && update?.message_id) {
+    if (!document && looksLikeDatabaseValue(text) && update?.message_id) {
       if (await handleDatabaseValueMessage(ctx, text, update.message_id)) return NextResponse.json({ ok: true });
     }
 
+    // ---- 📤📥 Export & import (owner only) ----
+    // /export, /import — also as the caption of a file message.
+    if (await handleExportImportCommand(ctx, text || caption, fileMessage)) return NextResponse.json({ ok: true });
+    // A .json/.csv sent to the bot on its own: read it and ask what to do.
+    if (document && (await handleExportImportFile(ctx, fileMessage, { caption }))) return NextResponse.json({ ok: true });
+    if (!text) return NextResponse.json({ ok: true });
+
     if (command === '/start' || command === '/help') {
-      await reply(chatId, `${HELP}\n\n${DATABASE_HELP}\n\nYour Chat ID is: <code>${chatId}</code>`, ctx.token);
+      await reply(chatId, `${HELP}\n\n${DATABASE_HELP}\n\n${EXPORT_HELP}\n\nYour Chat ID is: <code>${chatId}</code>`, ctx.token);
     } else if (command === '/rate') {
       try {
         const { quote } = await currentQuote();
