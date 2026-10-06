@@ -228,23 +228,18 @@ export default function RateTracker() {
             <h2 className="text-slate-400 text-sm font-medium uppercase tracking-[0.2em]">
               USD / KHR Exchange Rate
             </h2>
-            <button
-              type="button"
-              onClick={() => void fetchRate(true)}
-              disabled={refreshingRate}
-              aria-label="Refresh exchange rate now"
-              title={refreshingRate ? 'Refreshing Wing Bank rate…' : 'Refresh rate now'}
-              className="inline-flex items-center justify-center rounded-lg p-2 text-slate-400 transition-colors hover:bg-white/10 hover:text-indigo-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 disabled:cursor-wait disabled:opacity-60"
-            >
-              <RefreshCw className={`h-4 w-4 ${refreshingRate ? 'animate-spin' : ''}`} />
-            </button>
           </div>
           <div className="relative flex items-center justify-center gap-4 mb-5">
             <span className="text-6xl md:text-8xl font-black tabular-nums text-white drop-shadow-[0_0_25px_rgba(99,102,241,0.4)]">
               {rate ? rate.toLocaleString() : '---'}
             </span>
-            <div
-              className={`flex items-center justify-center p-2.5 rounded-2xl ${
+            <button
+              type="button"
+              onClick={() => void fetchRate(true)}
+              disabled={refreshingRate}
+              aria-label={refreshingRate ? 'Refreshing exchange rate' : 'Refresh exchange rate now'}
+              title={refreshingRate ? 'Refreshing Wing Bank rate…' : 'Refresh rate now'}
+              className={`flex cursor-pointer items-center justify-center p-2.5 rounded-2xl transition-colors hover:brightness-125 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 disabled:cursor-wait disabled:opacity-80 ${
                 trend === 'up'
                   ? 'bg-indigo-500/15 text-indigo-300 ring-1 ring-indigo-500/30'
                   : trend === 'down'
@@ -252,14 +247,16 @@ export default function RateTracker() {
                   : 'bg-white/5 text-slate-400 ring-1 ring-white/10'
               }`}
             >
-              {trend === 'up' ? (
+              {refreshingRate ? (
+                <RefreshCw className="h-6 w-6 animate-spin" />
+              ) : trend === 'up' ? (
                 <TrendingUp className="h-6 w-6" />
               ) : trend === 'down' ? (
                 <TrendingDown className="h-6 w-6" />
               ) : (
                 <RefreshCw className="h-6 w-6" />
               )}
-            </div>
+            </button>
           </div>
 
           {/* Wing Bank counter rates */}
