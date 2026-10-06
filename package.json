@@ -8,6 +8,7 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test:link": "tsx scripts/test-db-link.ts",
+    "test:export": "tsx scripts/test-db-export.ts",
     "test:link:live": "tsx scripts/test-db-link-live.ts"
   },
   "dependencies": {

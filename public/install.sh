@@ -352,7 +352,7 @@ setup_telegram() {
 
   curl -fsS "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setMyCommands" \
     -H 'Content-Type: application/json' \
-    -d '{"commands":[{"command":"rate","description":"Current Wing Bank USD/KHR rate"},{"command":"alert","description":"Subscribe to rate change alerts"},{"command":"stop","description":"Stop alerts"},{"command":"start","description":"Show help & your chat ID"}]}' \
+    -d '{"commands":[{"command":"rate","description":"Current Wing Bank USD/KHR rate"},{"command":"alert","description":"Subscribe to rate change alerts"},{"command":"stop","description":"Stop alerts"},{"command":"database","description":"Connect, switch or test the database"},{"command":"export","description":"Download the database as a file"},{"command":"import","description":"Restore the database from a file"},{"command":"start","description":"Show help & your chat ID"}]}' \
     >/dev/null 2>&1 && ok "Bot commands registered"
 
   if [ -z "$DOMAIN" ]; then
