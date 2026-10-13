@@ -192,9 +192,26 @@ export interface NotifyResult {
   matched: number;
   /** Alerts that Telegram/the webhook accepted */
   delivered: number;
+  /** Alerts that were attempted but never accepted, after every retry. */
+  failed: number;
   /** First delivery error, for logs and API responses */
   error?: string;
+  /** One error per failed alert — so a burst of failures is visible, not just the first. */
+  errors?: string[];
+  /** Why nothing was sent at all. Absent when something was attempted. */
+  reason?: NotifySkipReason;
 }
+
+/** Why a tick produced no Telegram traffic. Surfaced by the cron/API so a
+ *  silent alert can be diagnosed instead of guessed at. */
+export type NotifySkipReason = 'no-alerts' | 'no-previous' | 'no-move';
+
+const skipped = (reason: NotifySkipReason): NotifyResult => ({
+  matched: 0,
+  delivered: 0,
+  failed: 0,
+  reason,
+});
 
 /**
  * Notify every active Telegram alert whose condition matches the new quote.
@@ -204,6 +221,12 @@ export interface NotifyResult {
  * **Alerts fire only when the price actually moved** (bid or ask differs from
  * the previous quote). When there is no previous quote (first tick, empty or
  * reset history) nothing is sent — an alert can only react to a real move.
+ *
+ * Delivery itself retries transient Telegram failures (429 rate limits, 5xx,
+ * network errors) inside `sendTelegramWebhookAlert`. Anything still failing
+ * after the retries is reported as `failed` with its error, because the price
+ * move has already been stored by then and the next tick will see "no change" —
+ * a failure nobody is told about is an alert that is gone for good.
  */
 export async function notifyRateChange(
   prev: { bid: number; ask: number } | null,
@@ -213,10 +236,13 @@ export async function notifyRateChange(
   const store = storeOverride ?? (await getStoreOrMemory());
   const allAlerts = await store.listAlerts();
   const alerts = allAlerts.filter((a) => a.active && hasDeliveryTarget(a));
-  if (alerts.length === 0) return { matched: 0, delivered: 0 };
+  if (alerts.length === 0) return skipped('no-alerts');
 
-  const moved = prev !== null && (prev.bid !== quote.bid || prev.ask !== quote.ask);
-  if (!moved) return { matched: 0, delivered: 0 };
+  // An alert can only react to a real move, so both of these are reported
+  // rather than silently swallowed: without a previous quote there is nothing
+  // to compare against, and an unchanged price is simply not news.
+  if (prev === null) return skipped('no-previous');
+  if (prev.bid === quote.bid && prev.ask === quote.ask) return skipped('no-move');
 
   // `/alert` subscriptions do not each store a copy of the bot token. Use the
   // dashboard bot token (or TELEGRAM_BOT_TOKEN) for those chats too, otherwise
@@ -254,9 +280,17 @@ export async function notifyRateChange(
     }),
   );
 
+  const matched = results.filter((r) => r.matched);
+  const delivered = matched.filter((r) => r.delivered).length;
+  const errors = matched.filter((r) => !r.delivered && r.error).map((r) => r.error as string);
+
   return {
-    matched: results.filter((r) => r.matched).length,
-    delivered: results.filter((r) => r.delivered).length,
-    error: results.find((r) => r.error)?.error,
+    matched: matched.length,
+    delivered,
+    // Counted, not swallowed: the price move has already been recorded at this
+    // point, so an unreported failure would be invisible forever.
+    failed: matched.length - delivered,
+    error: errors[0],
+    errors,
   };
 }

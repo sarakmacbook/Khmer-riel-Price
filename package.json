@@ -9,7 +9,10 @@
     "typecheck": "tsc --noEmit",
     "test:link": "tsx scripts/test-db-link.ts",
     "test:export": "tsx scripts/test-db-export.ts",
-    "test:link:live": "tsx scripts/test-db-link-live.ts"
+    "test:link:live": "tsx scripts/test-db-link-live.ts",
+    "test": "tsx --test scripts/test-alerts.ts && tsx --experimental-test-module-mocks --test scripts/test-cron.ts",
+    "test:alerts": "tsx --test scripts/test-alerts.ts",
+    "test:cron": "tsx --experimental-test-module-mocks --test scripts/test-cron.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.18.0",

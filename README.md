@@ -164,6 +164,9 @@ bash scripts/update-rates.sh    # every 10 sec by default (override RATE_UPDATE_
 | `EXPORT_LIMIT` | Optional — max history rows in one `/export` file, default `50000` (the newest rows win, and the file says it was truncated) |
 | `EXPORT_MAX_MB` | Optional — upload budget for an export, default `20` (the export is shrunk to fit rather than failing Telegram's 50 MB limit) |
 | `IMPORT_MAX_MB` | Optional — largest file `/import` accepts, default `5` (Telegram itself caps bot downloads at 20 MB) |
+| `TELEGRAM_SEND_ATTEMPTS` | Optional — attempts per message when Telegram fails transiently (429 / 5xx / network), default `3`, max `5` |
+| `TELEGRAM_SEND_BUDGET_MS` | Optional — wall-clock ceiling for one send including backoff, default `20000`. Retries stop before exceeding it, so delivery can never outlive the function |
+| `TELEGRAM_RETRY_AFTER_MAX_MS` | Optional — cap on Telegram's `retry_after` pause, default `8000` |
 | `TELEGRAM_FILE_TIMEOUT_MS` | Optional — timeout for uploading/downloading a file, default `60000` |
 
 > **Telegram alerts work with any storage backend.** Alert settings and bot
@@ -192,7 +195,8 @@ The project is tuned to deploy small and cold-start fast:
 - 🗜 **Optimized PWA icons** — 1 MB → **5 KB** (192px) and 117 KB → **6 KB** (512px), cutting ~1.1 MB from the deploy artifact
 - 🐘 **Serverless-safe Postgres** — one cached pool (`max: 3`) reused across warm invocations, auto-TLS for Neon/Supabase, works with `POSTGRES_URL` **or** `DATABASE_URL`
 - 🧹 **No `@vercel/postgres` / `telegraf` in the bundle** — the DB client uses plain `pg`, Telegram uses `fetch`
-- ⏰ **Hobby-safe cron** — `vercel.json` ships a **daily** schedule (`0 0 * * *`) so free Hobby deployments remain deployable; use a Pro cron or external scheduler for unattended minute-level checks
+- ⏰ **Hobby-safe cron** — `vercel.json` ships a **daily** schedule (`0 0 * * *`) so free Hobby deployments stay deployable: Vercel rejects a cron scheduled more often than daily on that plan. For minute-level alerts use an external scheduler (below), or Pro + `* * * * *`
+- 🔁 **Retried alert delivery** — Telegram 429 rate limits, 5xx and network errors are retried with backoff (honouring Telegram's `retry_after`), so a transient blip no longer costs you that price change for good
 
 ### Steps
 
@@ -208,12 +212,61 @@ The project is tuned to deploy small and cold-start fast:
 
 > 📌 Wing Bank does not push rate changes to the app, so alerts are sent as
 > soon as polling detects a change. With the dashboard open, the rate source is
-> checked about every **10 seconds**. The VPS/Docker poller also runs every 10 seconds.
-> Vercel **Hobby** only permits a daily cron (and may run it up to 59 minutes
-> late), so it cannot provide unattended near-real-time alerts. For background
-> minute-level checks on Vercel, use **Pro** and set the cron schedule to
-> `* * * * *`, or use an external scheduler to call `/api/cron/update-rate`
-> once per minute.
+> checked about every **10 seconds** (alerts are delivered in the background, so
+> polling stays fast). The VPS/Docker poller also runs every 10 seconds.
+>
+> **On Vercel the cron is the only unattended trigger** — and `vercel.json` has
+> to stay on a **daily** schedule. Vercel's **Hobby** plan does not accept a cron
+> scheduled more often than once a day: putting `* * * * *` in `vercel.json`
+> makes the deployment itself fail, it is not merely throttled at runtime.
+>
+> So for unattended near-real-time alerts, leave `vercel.json` alone and point
+> any free scheduler (cron-job.org, GitHub Actions, EasyCron…) at the endpoint
+> once per minute:
+>
+> ```bash
+> curl -fsS "https://your-app.vercel.app/api/cron/update-rate" \
+>   -H "Authorization: Bearer $CRON_SECRET"
+> ```
+>
+> The endpoint is idempotent and cheap: it only records a tick and notifies when
+> the price actually moved, so overlapping or extra calls cannot duplicate an
+> alert. On **Pro** you can instead set `vercel.json` to `* * * * *` and drop the
+> external scheduler.
+>
+> Until then, alerts still fire within ~10 s whenever the dashboard is open,
+> because the live-rate endpoint records ticks and delivers alerts in the
+> background.
+
+### 🩺 "The bot never alerts" — read the reason, don't guess
+
+Both endpoints now say *why* nothing was sent, instead of returning a
+successful-looking response that quietly delivered nothing.
+
+```bash
+curl https://your-app.vercel.app/api/health
+#   "alerts": { "ready": false, "deliverable": 0, "hasToken": false,
+#               "persistent": false,
+#               "problems": ["In-memory (no database) does not persist …",
+#                            "no active alert with a Chat ID or Webhook URL is saved"] }
+
+curl -H "Authorization: Bearer $CRON_SECRET" https://your-app.vercel.app/api/cron/update-rate
+#   { "moved": true, "matched": 1, "notified": 1, "failed": 0,
+#     "reason": null, "warnings": [] }
+```
+
+| What you see | What it means | Fix |
+| --- | --- | --- |
+| `persistent: false` | No database is connected. A serverless invocation cannot see the previous price, so a move is undetectable and alerts can never fire | Connect any supported database (Vercel **Storage** tab, or `/database` in Telegram) |
+| `reason: "no-alerts"` | The price moved but no **active** alert has a Chat ID or Webhook URL | Save an alert in the dashboard, or send `/alert` to the bot |
+| `reason: "no-move"` | Wing Bank's bid **and** ask are unchanged — correctly silent | — |
+| `reason: "no-previous"` | First tick ever (empty or freshly reset history) | The next change will alert |
+| `failed: 1` + `alertErrors` | Delivery was attempted and failed after every retry — the error text is Telegram's own (401 = wrong token, 403 = the chat never pressed *Start*, 429 = rate limited) | Fix the reported cause; the price change is not re-sent automatically |
+
+Delivery itself is retried (default **3 attempts** inside a **20 s** budget,
+honouring Telegram's `retry_after`), so a single 429 or 502 no longer loses an
+alert. Anything still failing is counted in `failed` and logged, because by then
+the new price is already stored and the next tick legitimately sees "no change".
 
 ---
 
@@ -491,6 +544,19 @@ node scripts/fake-blob-server.mjs &   # stands in for a cloud store over HTTP
 npm run test:link:live                # 25 checks end to end: two real HTTP-backed
                                       # databases, one killed mid-flight → the other serves,
                                       # the first recovers → traffic returns and data is copied back
+
+npm run test:alerts        # 9 checks for the alert path: delivery on a price move,
+                           # retry after a Telegram 429 (retry_after) and after a 502,
+                           # no retry on a permanent 401, failures counted, and the
+                           # reason reported when a tick is correctly silent
+
+npm run test:cron          # 6 checks driving the real /api/cron/update-rate handler
+                           # (only the Wing Bank scrape is stubbed): alert fires in the
+                           # same run that sees the move, survives a rate limit, reports
+                           # an undeliverable one, and explains no-move / no-alerts /
+                           # non-persistent-store
+
+npm test                   # both of the above
 ```
 
 ---

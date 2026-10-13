@@ -18,6 +18,26 @@ const SEND_TIMEOUT_MS = Number(process.env.TELEGRAM_TIMEOUT_MS) || 10_000;
 /** Uploading/downloading files is slower than a message — its own, longer budget. */
 const FILE_TIMEOUT_MS = Number(process.env.TELEGRAM_FILE_TIMEOUT_MS) || 60_000;
 
+/**
+ * How many times one send is attempted when Telegram (or the network) fails
+ * transiently. Vercel serverless + Telegram rate limits make single-shot
+ * delivery lossy: a 429 or a 502 used to drop the alert for good, because the
+ * price change had already been recorded and the next tick saw "no change".
+ */
+const SEND_ATTEMPTS = Math.min(5, Math.max(1, Number(process.env.TELEGRAM_SEND_ATTEMPTS) || 3));
+
+/**
+ * Wall-clock ceiling for one send (attempts + backoff). Retrying is pointless
+ * if it would outlive the function that started it, so the budget is always
+ * at least one attempt and is checked before every retry.
+ */
+const SEND_BUDGET_MS = Math.max(SEND_TIMEOUT_MS, Number(process.env.TELEGRAM_SEND_BUDGET_MS) || 20_000);
+
+/** Telegram's `retry_after` can ask for a long pause; never wait more than this. */
+const MAX_RETRY_AFTER_MS = Number(process.env.TELEGRAM_RETRY_AFTER_MAX_MS) || 8_000;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 /** Telegram refuses `getFile` downloads above this size (bot API limit). */
 export const TELEGRAM_DOWNLOAD_LIMIT = 20 * 1024 * 1024;
 
@@ -72,18 +92,69 @@ function transportFailure(err: unknown, timeoutMs: number): TelegramResponse {
 }
 
 /** POST JSON to `url`, tolerating non-JSON bodies and hung connections. */
-async function postJson(url: string, body: unknown): Promise<TelegramResponse> {
+async function postJson(url: string, body: unknown, timeoutMs = SEND_TIMEOUT_MS): Promise<TelegramResponse> {
   try {
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     return await readResponse(res);
   } catch (err) {
-    return transportFailure(err, SEND_TIMEOUT_MS);
+    return transportFailure(err, timeoutMs);
   }
+}
+
+/**
+ * True for failures that a later attempt can plausibly fix:
+ *   • no HTTP response at all (DNS, TLS, connect/timeout)
+ *   • 429 — Telegram's rate limit (the common case when several chats alert at once)
+ *   • 408 / 409 / 5xx — Telegram or a proxy hiccuping
+ *
+ * Deliberately false for 400/401/403/404: a wrong token, a bad chat id or
+ * broken markup will fail identically every time, so retrying only burns the
+ * function's remaining time before reporting the real problem.
+ */
+export function isRetryableResponse(res: TelegramResponse): boolean {
+  if (res.networkError) return true;
+  if (res.status === 429 || res.status === 408 || res.status === 409) return true;
+  return res.status >= 500 && res.status <= 504;
+}
+
+/** Telegram's requested pause (`parameters.retry_after`, seconds) in ms, capped. */
+function retryAfterMs(res: TelegramResponse): number {
+  const raw = (res.data as { parameters?: { retry_after?: number } } | null)?.parameters?.retry_after;
+  const seconds = Number(raw);
+  if (!Number.isFinite(seconds) || seconds <= 0) return 0;
+  return Math.min(seconds * 1000, MAX_RETRY_AFTER_MS);
+}
+
+/** Too little time left for another attempt to be worth starting. */
+const MIN_ATTEMPT_MS = 1_000;
+
+/**
+ * POST JSON with bounded retries — the delivery path for alert messages.
+ *
+ * Honours Telegram's `retry_after` when present, otherwise backs off
+ * 250ms → 500ms → 1s. Each attempt is limited to the time still left inside
+ * SEND_BUDGET_MS, so a slow Telegram can never outlive the function that
+ * started it — while a retry after a full timeout still fits and is used.
+ */
+async function postJsonRetry(url: string, body: unknown): Promise<TelegramResponse> {
+  const deadline = Date.now() + SEND_BUDGET_MS;
+  let res = await postJson(url, body);
+
+  for (let attempt = 2; attempt <= SEND_ATTEMPTS; attempt++) {
+    if (!isRetryableResponse(res)) break;
+    const wait = retryAfterMs(res) || 250 * 2 ** (attempt - 2);
+    // Spend only what is left, so the whole send stays inside the budget.
+    const attemptMs = Math.min(SEND_TIMEOUT_MS, deadline - Date.now() - wait);
+    if (attemptMs < MIN_ATTEMPT_MS) break;
+    await sleep(wait);
+    res = await postJson(url, body, attemptMs);
+  }
+  return res;
 }
 
 /** POST a multipart/form-data body — used to upload export files. */
@@ -155,7 +226,7 @@ export async function sendTelegramMessage(
   }
   if (!text) return { success: false, error: 'Refusing to send an empty message.' };
 
-  const res = await postJson(`${TELEGRAM_API_BASE}/bot${token}/sendMessage`, {
+  const res = await postJsonRetry(`${TELEGRAM_API_BASE}/bot${token}/sendMessage`, {
     chat_id: chat,
     text,
     parse_mode: 'HTML',
@@ -183,7 +254,7 @@ export async function editTelegramMessage(
   const token = (botToken ?? '').trim();
   if (!isUsableSecret(token)) return { success: false, error: 'No bot token available.' };
 
-  const res = await postJson(`${TELEGRAM_API_BASE}/bot${token}/editMessageText`, {
+  const res = await postJsonRetry(`${TELEGRAM_API_BASE}/bot${token}/editMessageText`, {
     chat_id: normalizeChatId(chatId),
     message_id: messageId,
     text,
@@ -202,7 +273,7 @@ export async function editTelegramMessage(
 export async function deleteTelegramMessage(botToken: string, chatId: string, messageId: number): Promise<SendTelegramMessageResult> {
   const token = (botToken ?? '').trim();
   if (!isUsableSecret(token)) return { success: false, error: 'No bot token available.' };
-  const res = await postJson(`${TELEGRAM_API_BASE}/bot${token}/deleteMessage`, {
+  const res = await postJsonRetry(`${TELEGRAM_API_BASE}/bot${token}/deleteMessage`, {
     chat_id: normalizeChatId(chatId),
     message_id: messageId,
   });
@@ -220,7 +291,7 @@ export async function answerCallbackQuery(
 ): Promise<SendTelegramMessageResult> {
   const token = (botToken ?? '').trim();
   if (!isUsableSecret(token) || !callbackQueryId) return { success: false, error: 'No bot token available.' };
-  const res = await postJson(`${TELEGRAM_API_BASE}/bot${token}/answerCallbackQuery`, {
+  const res = await postJsonRetry(`${TELEGRAM_API_BASE}/bot${token}/answerCallbackQuery`, {
     callback_query_id: callbackQueryId,
     ...(options.text ? { text: options.text.slice(0, 200) } : {}),
     ...(options.showAlert ? { show_alert: true } : {}),
@@ -423,12 +494,12 @@ export async function sendTelegramWebhookAlert(params: SendTelegramAlertParams):
       const chat = normalizeChatId(chatId) || parsed.searchParams.get('chat_id') || '';
       if (chat) body.chat_id = chat;
 
-      const res = await postJson(url, body);
+      const res = await postJsonRetry(url, body);
       return res.ok ? { success: true } : { success: false, error: describeFailure(res, 'Telegram webhook error') };
     }
 
     // Generic webhook (supports Zapier, Make, custom relay)
-    const res = await postJson(url, {
+    const res = await postJsonRetry(url, {
       text,
       message: text,
       content: text,
