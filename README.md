@@ -206,7 +206,6 @@ The project is tuned to deploy small and cold-start fast:
 4. Set `TELEGRAM_BOT_TOKEN`, `NEXT_PUBLIC_SITE_URL`, optional `CRON_SECRET` (needs a redeploy afterwards).
 5. Register the webhook:
    ```bash
-   curl -X POST https://your-app.vercel.app/api/bot/webhook   # (Telegram side)
    curl "https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://your-app.vercel.app/api/bot/webhook"
    ```
 
@@ -214,29 +213,107 @@ The project is tuned to deploy small and cold-start fast:
 > soon as polling detects a change. With the dashboard open, the rate source is
 > checked about every **10 seconds** (alerts are delivered in the background, so
 > polling stays fast). The VPS/Docker poller also runs every 10 seconds.
->
-> **On Vercel the cron is the only unattended trigger** — and `vercel.json` has
-> to stay on a **daily** schedule. Vercel's **Hobby** plan does not accept a cron
-> scheduled more often than once a day: putting `* * * * *` in `vercel.json`
-> makes the deployment itself fail, it is not merely throttled at runtime.
->
-> So for unattended near-real-time alerts, leave `vercel.json` alone and point
-> any free scheduler (cron-job.org, GitHub Actions, EasyCron…) at the endpoint
-> once per minute:
->
-> ```bash
-> curl -fsS "https://your-app.vercel.app/api/cron/update-rate" \
->   -H "Authorization: Bearer $CRON_SECRET"
-> ```
->
-> The endpoint is idempotent and cheap: it only records a tick and notifies when
-> the price actually moved, so overlapping or extra calls cannot duplicate an
-> alert. On **Pro** you can instead set `vercel.json` to `* * * * *` and drop the
-> external scheduler.
->
-> Until then, alerts still fire within ~10 s whenever the dashboard is open,
-> because the live-rate endpoint records ticks and delivers alerts in the
-> background.
+
+### 🔔 Keep Telegram alerts running 24/7 on Vercel
+
+**You do not need to keep the dashboard open or keep a serverless function
+alive.** A scheduler calls `/api/cron/update-rate` regularly; each invocation
+fetches the quote, saves it to the database, and sends matching Telegram alerts
+when a price move is detected. Telegram's webhook handles bot commands — it
+**does not** poll Wing Bank or replace the scheduler.
+
+#### Option A — Vercel Hobby + an external scheduler (recommended for Hobby)
+
+Leave `vercel.json` on its included **daily** schedule (`0 0 * * *`). Vercel
+Hobby rejects schedules more frequent than once a day, so changing it to
+`* * * * *` on Hobby makes the deployment fail. Use an external HTTP scheduler
+such as [cron-job.org](https://cron-job.org/) for minute-level checks instead:
+
+1. In Vercel → **Settings → Environment Variables**, set these for
+   **Production**, then **redeploy**:
+   - `TELEGRAM_BOT_TOKEN`: your BotFather token.
+   - `NEXT_PUBLIC_SITE_URL`: your stable production URL, e.g.
+     `https://your-app.vercel.app` (not a temporary preview URL).
+   - `CRON_SECRET`: a long random secret; generate one with
+     `openssl rand -hex 32`. Keep it private and out of Git.
+   - A persistent database's connection variables (see the database table
+     below). Use Vercel environment variables or `DB_CONFIG_JSON` so **every
+     cold instance** uses the same database. A database chosen only through
+     Telegram can be local to the instance handling that webhook.
+2. Register the Telegram webhook using the command in the deployment steps
+   above. If you set `TELEGRAM_WEBHOOK_SECRET`, also pass its value as
+   `secret_token` when registering. Open your bot in Telegram, press **Start**,
+   then send **`/alert`** to save your chat's subscription. Alternatively, save
+   an enabled alert with your Chat ID in the dashboard's bell menu and use
+   **Test alert** to verify delivery.
+3. Create a job in cron-job.org (or an equivalent HTTP scheduler) with:
+
+   | Setting | Value |
+   | --- | --- |
+   | URL | `https://your-app.vercel.app/api/cron/update-rate` |
+   | Method | `GET` |
+   | Schedule | Every **1 minute**, all hours and all days |
+   | Request header | `Authorization: Bearer <your CRON_SECRET value>` |
+   | Timeout | Allow up to **60 seconds** if the scheduler supports it; otherwise monitor timeout failures |
+
+   Paste the **actual secret** in the scheduler's header field, not the text
+   `$CRON_SECRET`. Do not put it in the URL. Enable the job and failure
+   notifications if available. The endpoint must be accessible to the
+   scheduler and the Telegram webhook must be accessible to Telegram; a
+   Vercel login/deployment-protection page blocks those callers. Use the
+   appropriate production access settings while keeping `CRON_SECRET` and,
+   preferably, `TELEGRAM_WEBHOOK_SECRET` enabled.
+4. Run the job manually once and inspect its response/history. You can also
+   test from a terminal with `CRON_SECRET` set in your local environment:
+
+   ```bash
+   curl --fail-with-body --max-time 60 \
+     "https://your-app.vercel.app/api/cron/update-rate" \
+     -H "Authorization: Bearer $CRON_SECRET"
+   curl --fail-with-body "https://your-app.vercel.app/api/health"
+   ```
+
+   Expect `persistent: true` in the cron response and `alerts.ready: true`
+   in health. `reason: "no-previous"` is normal for the first tick;
+   `reason: "no-move"` is normal while the quote is unchanged. A matching move
+   should report `notified` greater than zero. HTTP 401 means the scheduler's
+   header does not match the deployed `CRON_SECRET`. Also inspect `failed`,
+   `alertErrors`, and `warnings`: HTTP 200 alone does not prove alert delivery.
+5. Close the dashboard and confirm the scheduler's execution history keeps
+   showing successful requests. The daily Vercel cron can remain as a fallback;
+   it is not sufficient for minute-level monitoring on its own.
+
+**Expected behavior:** checks continue unattended around the clock, with alerts
+on detected changes, not a message every minute. Detection is normally within
+about one polling interval plus request/delivery time, not guaranteed instant.
+Scheduler outages, database or Telegram failures, function limits and plan
+quotas can delay or prevent delivery. One-minute polling is roughly **1,440
+invocations/day**; monitor Vercel and database usage and the scheduler's limits.
+Do not use an infinite loop, `setInterval`, or a browser keep-alive tab to run
+background work on Vercel. GitHub Actions schedules are not a one-minute
+alternative: their minimum interval is five minutes and runs can be delayed.
+
+#### Option B — Vercel Pro Cron
+
+With a plan that supports minute-level cron, use the same database, bot,
+subscription and secret setup above, then change `vercel.json` to:
+
+```json
+{
+  "crons": [
+    {
+      "path": "/api/cron/update-rate",
+      "schedule": "* * * * *"
+    }
+  ]
+}
+```
+
+Redeploy to **Production**. Vercel Cron sends
+`Authorization: Bearer <CRON_SECRET>` automatically when that environment
+variable is set. Check cron executions in Vercel and disable the external
+minute scheduler if you were using one. No continuously running bot process
+is needed with either option.
 
 ### 🩺 "The bot never alerts" — read the reason, don't guess
 
