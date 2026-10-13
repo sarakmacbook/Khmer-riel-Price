@@ -195,7 +195,7 @@ The project is tuned to deploy small and cold-start fast:
 - 🗜 **Optimized PWA icons** — 1 MB → **5 KB** (192px) and 117 KB → **6 KB** (512px), cutting ~1.1 MB from the deploy artifact
 - 🐘 **Serverless-safe Postgres** — one cached pool (`max: 3`) reused across warm invocations, auto-TLS for Neon/Supabase, works with `POSTGRES_URL` **or** `DATABASE_URL`
 - 🧹 **No `@vercel/postgres` / `telegraf` in the bundle** — the DB client uses plain `pg`, Telegram uses `fetch`
-- ⏰ **Minute-level cron** — `vercel.json` ships `* * * * *`, so the rate (and with it the alerts) is checked every minute wherever Vercel allows it. Vercel **Hobby** still throttles cron jobs to once a day, so for unattended near-real-time alerts on Hobby add an external scheduler (below)
+- ⏰ **Hobby-safe cron** — `vercel.json` ships a **daily** schedule (`0 0 * * *`) so free Hobby deployments stay deployable: Vercel rejects a cron scheduled more often than daily on that plan. For minute-level alerts use an external scheduler (below), or Pro + `* * * * *`
 - 🔁 **Retried alert delivery** — Telegram 429 rate limits, 5xx and network errors are retried with backoff (honouring Telegram's `retry_after`), so a transient blip no longer costs you that price change for good
 
 ### Steps
@@ -215,11 +215,14 @@ The project is tuned to deploy small and cold-start fast:
 > checked about every **10 seconds** (alerts are delivered in the background, so
 > polling stays fast). The VPS/Docker poller also runs every 10 seconds.
 >
-> **On Vercel the cron is the only unattended trigger.** `vercel.json` asks for
-> every minute (`* * * * *`) — honoured on **Pro**. Vercel **Hobby** throttles
-> cron jobs to once a day (and may run it up to 59 minutes late), so Hobby alone
-> cannot give unattended near-real-time alerts; point any free scheduler
-> (cron-job.org, GitHub Actions, EasyCron…) at it once per minute:
+> **On Vercel the cron is the only unattended trigger** — and `vercel.json` has
+> to stay on a **daily** schedule. Vercel's **Hobby** plan does not accept a cron
+> scheduled more often than once a day: putting `* * * * *` in `vercel.json`
+> makes the deployment itself fail, it is not merely throttled at runtime.
+>
+> So for unattended near-real-time alerts, leave `vercel.json` alone and point
+> any free scheduler (cron-job.org, GitHub Actions, EasyCron…) at the endpoint
+> once per minute:
 >
 > ```bash
 > curl -fsS "https://your-app.vercel.app/api/cron/update-rate" \
@@ -227,7 +230,13 @@ The project is tuned to deploy small and cold-start fast:
 > ```
 >
 > The endpoint is idempotent and cheap: it only records a tick and notifies when
-> the price actually moved, so overlapping or extra calls cannot duplicate an alert.
+> the price actually moved, so overlapping or extra calls cannot duplicate an
+> alert. On **Pro** you can instead set `vercel.json` to `* * * * *` and drop the
+> external scheduler.
+>
+> Until then, alerts still fire within ~10 s whenever the dashboard is open,
+> because the live-rate endpoint records ticks and delivers alerts in the
+> background.
 
 ### 🩺 "The bot never alerts" — read the reason, don't guess
 
