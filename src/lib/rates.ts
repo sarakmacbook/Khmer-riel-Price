@@ -1,8 +1,8 @@
-import { after } from 'next/server';
 import { activeSignature, getStoreOrMemory, memoryStore, type RateRow, type RateStore, type StoreKind } from '@/lib/store';
 import { errMsg } from '@/lib/store/types';
 import { fetchWingBankQuote } from '@/lib/scraper';
 import { notifyRateChange } from '@/lib/alerts';
+import { runAfterResponse } from '@/lib/after-response';
 
 /** Minimum seconds between Wing Bank checks. */
 export const REFRESH_MS = Math.max(10, Number(process.env.REFRESH_SECONDS) || 60) * 1000;
@@ -70,16 +70,6 @@ async function doRefresh(): Promise<LatestRate> {
   }
 }
 
-/** Run a task after the response is sent (Vercel keeps the function alive via waitUntil). */
-function runAfterResponse(task: () => Promise<unknown>) {
-  const safe = () => task().catch((e) => console.error('[refresh]', errMsg(e)));
-  try {
-    after(safe);
-  } catch {
-    void safe(); // outside a request scope
-  }
-}
-
 /**
  * Latest rate, stale-while-revalidate:
  * 1. cached row on this instance (younger than the store's readTtl) or a fresh read from the store,
@@ -112,7 +102,7 @@ export async function getLatestRate(): Promise<LatestRate> {
   if (now - row.c > REFRESH_MS && now - lastClaim > Math.min(REFRESH_MS, 30_000)) {
     g.__wingrateLastClaim = now;
     const claimed = await store.claimRefresh(now, REFRESH_MS).catch(() => false);
-    if (claimed) runAfterResponse(refreshRate);
+    if (claimed) runAfterResponse(refreshRate, 'refresh');
   }
   return toLatest(row, store.kind);
 }

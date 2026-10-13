@@ -2,11 +2,13 @@ import { NextRequest, NextResponse } from 'next/server';
 import { fetchWingBankQuote } from '@/lib/scraper';
 import { getLatestTick, saveTick, storeBackend } from '@/lib/history-store';
 import { notifyRateChange } from '@/lib/alerts';
+import { runAfterResponse } from '@/lib/after-response';
 
 export const dynamic = 'force-dynamic';
-// Give the Wing Bank scrape room to finish on a cold start without being
-// killed by the serverless function limit.
-export const maxDuration = 30;
+// Room for the Wing Bank scrape on a cold start AND the alert delivery that
+// continues after the response (Telegram timeouts + retries are bounded by
+// TELEGRAM_SEND_BUDGET_MS). This is a ceiling, not time reserved per request.
+export const maxDuration = 60;
 
 // Keep the edge cache short so active clients notice bank rate changes quickly.
 // The scraper has its own short cache to avoid hammering Wing Bank.
@@ -60,13 +62,21 @@ export async function GET(req: NextRequest) {
     const recorded = await saveTick({ rate: quote.bid, bid: quote.bid, ask: quote.ask });
     if (recorded?.changed && recorded.prev) {
       const previous = { bid: recorded.prev.bid, ask: recorded.prev.ask };
-      try {
-        const result = await notifyRateChange(previous, quote);
-        if (result.error) console.error('[rate] telegram alert failed:', result.error);
-      } catch (error) {
-        // Telegram must never make the live-rate endpoint fail.
-        console.error('[rate] telegram alerts failed:', error instanceof Error ? error.message : String(error));
-      }
+      // Delivery can take seconds (Telegram timeouts + retries), and the
+      // dashboard polls this endpoint once per second — so send after the
+      // response. The alert still leaves this invocation; the client just
+      // stops paying for Telegram's latency.
+      runAfterResponse(async () => {
+        try {
+          const result = await notifyRateChange(previous, quote);
+          if (result.failed) {
+            console.error(`[rate] ${result.failed} alert(s) not delivered:`, ...(result.errors ?? []));
+          }
+        } catch (error) {
+          // Telegram must never make the live-rate endpoint fail.
+          console.error('[rate] telegram alerts failed:', error instanceof Error ? error.message : String(error));
+        }
+      }, 'rate');
     }
   }
 
