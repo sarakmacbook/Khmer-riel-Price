@@ -6,12 +6,61 @@
   --accent: #6366f1; /* indigo — primary accent */
 }
 
+/* ---------------------------------------------------------------------------
+   iOS safe areas
+   The app is rendered with `viewport-fit=cover`, so the page paints edge to
+   edge — behind the notch / Dynamic Island and under the home indicator.
+   Every edge therefore has to add the matching inset itself, otherwise the
+   sticky header hides under the status bar and the footer gets clipped.
+   `env()` resolves to 0px on platforms without insets, so this is a no-op
+   on desktop/Android.
+--------------------------------------------------------------------------- */
+:root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --gutter: 1rem;
+}
+
 body {
   background:
     radial-gradient(1100px 600px at 20% -10%, rgba(99, 102, 241, 0.14), transparent 60%),
     radial-gradient(900px 600px at 85% 5%, rgba(99, 102, 241, 0.08), transparent 55%),
     linear-gradient(180deg, var(--bg-1), var(--bg-2));
   background-attachment: fixed;
+  /* Landscape on a notched iPhone puts the notch on one side — keep the
+     content clear of it. `position: fixed` overlays ignore body padding,
+     so they use .safe-overlay instead. */
+  padding-left: var(--safe-left);
+  padding-right: var(--safe-right);
+}
+
+/* Top inset for the sticky header: its background still paints behind the
+   status bar, but the logo/title stay below the notch. */
+.safe-top {
+  padding-top: var(--safe-top);
+}
+
+/* Bottom inset for the page body: the last card must clear the home
+   indicator (and the Safari toolbar). */
+.safe-bottom {
+  padding-bottom: calc(var(--gutter) * 2 + var(--safe-bottom));
+}
+
+/* Full-bleed fixed overlays (modals) — they are positioned against the
+   viewport, so they need the insets baked in themselves. */
+.safe-overlay {
+  padding-top: calc(var(--gutter) + var(--safe-top));
+  padding-bottom: calc(var(--gutter) + var(--safe-bottom));
+  padding-left: calc(var(--gutter) + var(--safe-left));
+  padding-right: calc(var(--gutter) + var(--safe-right));
+}
+
+/* Scrollable panel inside .safe-overlay — never taller than the space that
+   is actually visible between the notch and the home indicator. */
+.safe-panel {
+  max-height: calc(100dvh - var(--safe-top) - var(--safe-bottom) - (var(--gutter) * 2));
 }
 
 /* subtle animated shimmer for the live price */

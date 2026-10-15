@@ -182,9 +182,9 @@ export default function TelegramAlertModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-md animate-in fade-in duration-200">
+    <div className="fixed inset-0 z-50 flex items-center justify-center safe-overlay bg-black/70 backdrop-blur-md animate-in fade-in duration-200">
       <div
-        className="relative w-full max-w-lg rounded-3xl p-6 bg-slate-900 border border-white/10 shadow-2xl text-slate-100 max-h-[90vh] overflow-y-auto"
+        className="relative w-full max-w-lg rounded-3xl p-6 bg-slate-900 border border-white/10 shadow-2xl text-slate-100 safe-panel overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}

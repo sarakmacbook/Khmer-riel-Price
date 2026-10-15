@@ -10,7 +10,7 @@ Real-time **USD/KHR exchange rate tracker** scraped from **[Wing Bank](https://w
 - 📊 **Live dashboard** — 1-second polling with change flash + up/down trend arrow
 - 📈 **Price history chart** — switch between **Buy (Bid)** and **Sell (Ask)**, ranges: **Day · Week · Month · Year · All** (daily snapshots)
 - 🧮 **Tiny calculator** — `Sell Ads` / `Buy Ads` unit-price converter: divides your KHR amount by the live Wing Bank ask/bid price (opens at `40` KHR)
-- 📲 **PWA** — add to home screen on **Android & iPhone** (manifest + service worker + icon)
+- 📲 **PWA** — add to home screen on **Android & iPhone** (manifest + service worker + icon) — edge-to-edge on iPhone, with the header, footer and modals kept clear of the notch / Dynamic Island and the home indicator (`env(safe-area-inset-*)`)
 - 🔔 **Browser notifications** — fire the moment the bank rate moves
 - 🤖 **Telegram** — bot commands + webhook alerts (`only on price move` / `rate above` / `rate below`), with a **custom alert message** template, configured from the UI next to the bell icon
 - 🗄 **Connect a database from Telegram** — `/database` menu to connect, switch, test or disconnect Postgres · Turso · MongoDB · Upstash · Redis · Vercel Blob at runtime, no redeploy or env edits
