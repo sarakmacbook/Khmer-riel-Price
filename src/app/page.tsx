@@ -151,7 +151,7 @@ export default function RateTracker() {
 
   if (loading) {
     return (
-      <div className="flex h-screen flex-col items-center justify-center gap-4">
+      <div className="flex min-h-dvh flex-col items-center justify-center gap-4">
         <BrandMark title="WingRate" className="h-16 w-16 rounded-2xl shadow-2xl shadow-indigo-500/30" />
         <RefreshCw className="h-5 w-5 animate-spin text-indigo-300" />
       </div>
@@ -184,9 +184,11 @@ export default function RateTracker() {
     : '';
 
   return (
-    <div className="min-h-screen text-slate-100 font-sans">
+    <div className="min-h-dvh text-slate-100 font-sans">
       {/* Header */}
-      <header className="bg-white/5 backdrop-blur-xl border-b border-white/10 sticky top-0 z-10">
+      {/* safe-top keeps the title/buttons below the notch & Dynamic Island while
+          the translucent bar still paints behind the status bar. */}
+      <header className="bg-white/5 backdrop-blur-xl border-b border-white/10 sticky top-0 z-10 safe-top">
         <div className="max-w-4xl mx-auto px-4 h-16 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <BrandMark className="h-9 w-9 rounded-xl shadow-lg shadow-indigo-500/30" />
@@ -218,7 +220,8 @@ export default function RateTracker() {
         </div>
       </header>
 
-      <main className="max-w-4xl mx-auto px-4 py-8">
+      {/* safe-bottom keeps the last card clear of the home indicator. */}
+      <main className="max-w-4xl mx-auto px-4 pt-8 safe-bottom">
         {/* Hero Rate Display */}
         <div className="relative overflow-hidden rounded-3xl p-8 mb-8 text-center border border-white/10 bg-slate-900/70 backdrop-blur-xl shadow-2xl">
           <div className="pointer-events-none absolute -top-20 -right-20 h-64 w-64 rounded-full bg-indigo-500/10 blur-3xl" />
